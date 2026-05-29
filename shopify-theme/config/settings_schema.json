@@ -1,0 +1,279 @@
+[
+  {
+    "name": "theme_info",
+    "theme_name": "3 Boxes Luxury",
+    "theme_version": "1.0.0",
+    "theme_author": "3 Boxes Luxury",
+    "theme_documentation_url": "",
+    "theme_support_url": "",
+    "settings": [
+      {
+        "type": "paragraph",
+        "content": "3 Boxes Luxury — A premium Shopify theme crafted for luxury gifting brands. Dark elegance meets gold sophistication."
+      }
+    ]
+  },
+  {
+    "name": "Colors",
+    "settings": [
+      {
+        "type": "color",
+        "id": "color_background",
+        "label": "Background",
+        "default": "#0c0a09",
+        "info": "Main background color used across the theme"
+      },
+      {
+        "type": "color",
+        "id": "color_text",
+        "label": "Text",
+        "default": "#fef3c7",
+        "info": "Primary text color"
+      },
+      {
+        "type": "color",
+        "id": "color_gold",
+        "label": "Gold",
+        "default": "#d4a437",
+        "info": "Primary gold accent color for headings, borders, and highlights"
+      },
+      {
+        "type": "color",
+        "id": "color_gold_light",
+        "label": "Gold light",
+        "default": "#f5e6a3",
+        "info": "Lighter gold for hover states and subtle accents"
+      },
+      {
+        "type": "color",
+        "id": "color_gold_dark",
+        "label": "Gold dark",
+        "default": "#b8860b",
+        "info": "Darker gold for pressed states and deep accents"
+      },
+      {
+        "type": "color",
+        "id": "color_amber",
+        "label": "Amber",
+        "default": "#d97706",
+        "info": "Amber accent for badges, sale tags, and notifications"
+      },
+      {
+        "type": "color",
+        "id": "color_card_background",
+        "label": "Card background",
+        "default": "#1c1917",
+        "info": "Background color for product cards and content panels"
+      },
+      {
+        "type": "color",
+        "id": "color_border",
+        "label": "Border",
+        "default": "rgba(120,53,15,0.3)",
+        "info": "Border color for cards, dividers, and input fields"
+      },
+      {
+        "type": "color",
+        "id": "color_muted_text",
+        "label": "Muted text",
+        "default": "#a8a29e",
+        "info": "Secondary or muted text color for descriptions and captions"
+      }
+    ]
+  },
+  {
+    "name": "Typography",
+    "settings": [
+      {
+        "type": "font_picker",
+        "id": "font_heading",
+        "label": "Heading font",
+        "default": "playfair_display_n7",
+        "info": "Used for headings, titles, and display text"
+      },
+      {
+        "type": "font_picker",
+        "id": "font_body",
+        "label": "Body font",
+        "default": "inter_n4",
+        "info": "Used for body text, navigation, and UI elements"
+      },
+      {
+        "type": "range",
+        "id": "base_font_size",
+        "label": "Base font size (px)",
+        "min": 12,
+        "max": 20,
+        "step": 1,
+        "default": 16,
+        "unit": "px",
+        "info": "The root font size — all other sizes scale from this value"
+      }
+    ]
+  },
+  {
+    "name": "Logo",
+    "settings": [
+      {
+        "type": "image_picker",
+        "id": "logo",
+        "label": "Logo image",
+        "info": "Upload your brand logo. Recommended: SVG or PNG with transparent background."
+      },
+      {
+        "type": "range",
+        "id": "logo_max_width",
+        "label": "Logo max width (desktop)",
+        "min": 50,
+        "max": 300,
+        "step": 5,
+        "default": 180,
+        "unit": "px"
+      },
+      {
+        "type": "range",
+        "id": "logo_mobile_max_width",
+        "label": "Logo max width (mobile)",
+        "min": 50,
+        "max": 200,
+        "step": 5,
+        "default": 120,
+        "unit": "px"
+      }
+    ]
+  },
+  {
+    "name": "Layout",
+    "settings": [
+      {
+        "type": "range",
+        "id": "container_width",
+        "label": "Container width (px)",
+        "min": 960,
+        "max": 1600,
+        "step": 10,
+        "default": 1280,
+        "unit": "px",
+        "info": "Maximum width for the main content container"
+      },
+      {
+        "type": "checkbox",
+        "id": "enable_sticky_header",
+        "label": "Enable sticky header",
+        "default": true,
+        "info": "Keep the header visible while scrolling"
+      },
+      {
+        "type": "checkbox",
+        "id": "enable_cart_drawer",
+        "label": "Enable cart drawer",
+        "default": true,
+        "info": "Open the cart as a slide-out drawer instead of navigating to the cart page"
+      }
+    ]
+  },
+  {
+    "name": "Social media",
+    "settings": [
+      {
+        "type": "text",
+        "id": "social_facebook_url",
+        "label": "Facebook",
+        "info": "https://facebook.com/your-brand"
+      },
+      {
+        "type": "text",
+        "id": "social_instagram_url",
+        "label": "Instagram",
+        "info": "https://instagram.com/your-brand"
+      },
+      {
+        "type": "text",
+        "id": "social_twitter_url",
+        "label": "Twitter / X",
+        "info": "https://x.com/your-brand"
+      },
+      {
+        "type": "text",
+        "id": "social_pinterest_url",
+        "label": "Pinterest",
+        "info": "https://pinterest.com/your-brand"
+      },
+      {
+        "type": "text",
+        "id": "social_youtube_url",
+        "label": "YouTube",
+        "info": "https://youtube.com/@your-brand"
+      }
+    ]
+  },
+  {
+    "name": "Favicon",
+    "settings": [
+      {
+        "type": "image_picker",
+        "id": "favicon",
+        "label": "Favicon image",
+        "info": "Recommended: 32×32px PNG or ICO file"
+      }
+    ]
+  },
+  {
+    "name": "Cart",
+    "settings": [
+      {
+        "type": "select",
+        "id": "cart_type",
+        "label": "Cart type",
+        "options": [
+          {
+            "value": "drawer",
+            "label": "Drawer"
+          },
+          {
+            "value": "page",
+            "label": "Page"
+          },
+          {
+            "value": "notification",
+            "label": "Notification"
+          }
+        ],
+        "default": "drawer",
+        "info": "Choose how the cart behaves when items are added"
+      },
+      {
+        "type": "checkbox",
+        "id": "enable_gift_wrapping",
+        "label": "Enable gift wrapping",
+        "default": true,
+        "info": "Allow customers to add premium gift wrapping to their order"
+      },
+      {
+        "type": "number",
+        "id": "gift_wrap_price",
+        "label": "Gift wrap price",
+        "default": 5.00,
+        "info": "Price charged for gift wrapping per order"
+      }
+    ]
+  },
+  {
+    "name": "SEO",
+    "settings": [
+      {
+        "type": "text",
+        "id": "seo_title_suffix",
+        "label": "Title suffix",
+        "default": "| 3 Boxes Luxury",
+        "info": "Appended to every page title for consistent branding in search results"
+      },
+      {
+        "type": "textarea",
+        "id": "seo_description",
+        "label": "Default meta description",
+        "info": "A default SEO description for pages that don't have a custom one. Recommended: 150–160 characters."
+      }
+    ]
+  }
+]
