@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
+import { ensureSeeded } from '@/lib/auto-seed'
 import {
   isShopifyConfigured,
   getShopifyProducts,
@@ -7,6 +8,36 @@ import {
   shopifyProductToAppProduct,
   getShopifyCollections,
 } from '@/lib/shopify/client'
+
+// ─── In-Memory Cache for Shopify Data ───
+interface CacheEntry<T> {
+  data: T
+  timestamp: number
+}
+
+const shopifyCache = new Map<string, CacheEntry<unknown>>()
+const CACHE_TTL = 60 * 1000 // 60 seconds — balance freshness vs. API calls
+
+function getCached<T>(key: string): T | null {
+  const entry = shopifyCache.get(key)
+  if (!entry) return null
+  if (Date.now() - entry.timestamp > CACHE_TTL) {
+    shopifyCache.delete(key)
+    return null
+  }
+  return entry.data as T
+}
+
+function setCache<T>(key: string, data: T): void {
+  shopifyCache.set(key, { data, timestamp: Date.now() })
+  // Evict old entries if cache grows too large
+  if (shopifyCache.size > 50) {
+    const oldest = [...shopifyCache.entries()].sort((a, b) => a[1].timestamp - b[1].timestamp)
+    for (let i = 0; i < 10 && i < oldest.length; i++) {
+      shopifyCache.delete(oldest[i][0])
+    }
+  }
+}
 
 // Platform slug to logo URL mapping
 const PLATFORM_LOGO_MAP: Record<string, string> = {
@@ -98,157 +129,226 @@ async function handleShopifySource(searchParams: URLSearchParams) {
   const page = parseInt(searchParams.get('page') || '1', 10)
   const limit = parseInt(searchParams.get('limit') || '12', 10)
 
-  // Fetch products from Shopify
-  let shopifyProducts
-  if (search) {
-    shopifyProducts = await searchShopifyProducts(search, 250)
-  } else {
-    const result = await getShopifyProducts(250)
-    shopifyProducts = result.products
-  }
+  // ─── Fetch Shopify products + collections IN PARALLEL with caching ───
+  const cacheKeyProducts = search ? `shopify-products-search:${search}` : 'shopify-products-all'
+  const cacheKeyCollections = 'shopify-collections-all'
+
+  // Cached + parallel: Shopify products & collections at the same time
+  const [shopifyProductsResult, collectionsResult] = await Promise.all([
+    (async () => {
+      const cached = getCached<typeof shopifyProducts>(cacheKeyProducts)
+      if (cached) return cached
+      let result
+      if (search) {
+        result = await searchShopifyProducts(search, 250)
+      } else {
+        const r = await getShopifyProducts(250)
+        result = r.products
+      }
+      setCache(cacheKeyProducts, result)
+      return result
+    })(),
+    (async () => {
+      try {
+        const cached = getCached<Awaited<ReturnType<typeof getShopifyCollections>>>(cacheKeyCollections)
+        if (cached) return cached
+        const collections = await getShopifyCollections()
+        setCache(cacheKeyCollections, collections)
+        return collections
+      } catch {
+        return null
+      }
+    })(),
+  ])
+
+  const shopifyProducts = shopifyProductsResult
 
   // Convert to app format
   const appProducts = shopifyProducts.map((sp) => shopifyProductToAppProduct(sp))
 
-  // Filter by category (productType) if specified
-  let filtered = appProducts
-  if (category) {
-    filtered = filtered.filter(
-      (p) => p.category?.toLowerCase() === category.toLowerCase()
-    )
+  // Build a category-name → slug map and slug → name map from Shopify collections
+  const categorySlugMap = new Map<string, string>()
+  const slugToNameMap = new Map<string, string>()
+  if (collectionsResult) {
+    for (const col of collectionsResult) {
+      categorySlugMap.set(col.title.toLowerCase(), col.handle)
+      slugToNameMap.set(col.handle.toLowerCase(), col.title.toLowerCase())
+    }
   }
 
-  // Build a category-name → slug map from Shopify collections
-  const categorySlugMap = new Map<string, string>()
-  try {
-    const collections = await getShopifyCollections()
-    for (const col of collections) {
-      categorySlugMap.set(col.title.toLowerCase(), col.handle)
-    }
-  } catch {
-    // Collections fetch is optional; continue without it
+  // Filter by category if specified
+  // Support both slug-based (e.g., "mens-shirts") and name-based (e.g., "Men's Shirts") matching
+  let filtered = appProducts
+  if (category) {
+    const categoryLower = category.toLowerCase()
+    // Try to resolve slug to collection name for matching
+    const resolvedName = slugToNameMap.get(categoryLower)
+    
+    filtered = filtered.filter((p) => {
+      const pCategory = p.category?.toLowerCase()
+      if (!pCategory) return false
+      // Match by exact category name, by slug, or by resolved collection name
+      return pCategory === categoryLower 
+        || pCategory.replace(/[^a-z0-9]+/g, '-') === categoryLower
+        || (resolvedName && pCategory === resolvedName)
+        || pCategory.includes(categoryLower.replace(/-/g, ' '))
+        || categoryLower.includes(pCategory.replace(/[^a-z0-9]+/g, ' '))
+    })
   }
 
   // Try to merge with local DB data for enrichment
-  const localProductsMap = new Map<string, {
-    images: string | null;
-    occasions: string | null;
-    recipientTypes: string | null;
-    relationships: string | null;
-    deliveryEstimate: string | null;
-    platform: string | null;
-    isExternal: boolean | null;
-    sourceUrl: string | null;
-    affiliateUrl: string | null;
-    commission: number | null;
-    syncStatus: string | null;
-    stock: number | null;
-    rating: number | null;
-    reviewCount: number | null;
-    featured: boolean | null;
-  }>()
+  // Also fetch local-only products IN PARALLEL with Shopify enrichment data
+  const cacheKeyLocalEnrichment = 'local-shopify-enrichment'
+  const cacheKeyLocalOnly = category ? `local-only-products:${category}` : 'local-only-products-all'
 
-  try {
-    const localProducts = await db.product.findMany({
-      where: {
-        shopifyId: { not: null },
-      },
-      select: {
-        shopifyId: true,
-        images: true,
-        occasions: true,
-        recipientTypes: true,
-        relationships: true,
-        deliveryEstimate: true,
-        platform: true,
-        isExternal: true,
-        sourceUrl: true,
-        affiliateUrl: true,
-        commission: true,
-        syncStatus: true,
-        stock: true,
-        rating: true,
-        reviewCount: true,
-        featured: true,
-      },
-    })
-    for (const lp of localProducts) {
-      if (lp.shopifyId) {
-        localProductsMap.set(lp.shopifyId, {
-          images: lp.images,
-          occasions: lp.occasions,
-          recipientTypes: lp.recipientTypes,
-          relationships: lp.relationships,
-          deliveryEstimate: lp.deliveryEstimate,
-          platform: lp.platform,
-          isExternal: lp.isExternal,
-          sourceUrl: lp.sourceUrl,
-          affiliateUrl: lp.affiliateUrl,
-          commission: lp.commission,
-          syncStatus: lp.syncStatus,
-          stock: lp.stock,
-          rating: lp.rating,
-          reviewCount: lp.reviewCount,
-          featured: lp.featured,
+  const [localProductsMapResult, localOnlyProductsResult] = await Promise.all([
+    (async () => {
+      const cached = getCached<Map<string, {
+        images: string | null;
+        occasions: string | null;
+        recipientTypes: string | null;
+        relationships: string | null;
+        deliveryEstimate: string | null;
+        platform: string | null;
+        isExternal: boolean | null;
+        sourceUrl: string | null;
+        affiliateUrl: string | null;
+        commission: number | null;
+        syncStatus: string | null;
+        stock: number | null;
+        rating: number | null;
+        reviewCount: number | null;
+        featured: boolean | null;
+      }>>(cacheKeyLocalEnrichment)
+      if (cached) return cached
+
+      const map = new Map<string, {
+        images: string | null;
+        occasions: string | null;
+        recipientTypes: string | null;
+        relationships: string | null;
+        deliveryEstimate: string | null;
+        platform: string | null;
+        isExternal: boolean | null;
+        sourceUrl: string | null;
+        affiliateUrl: string | null;
+        commission: number | null;
+        syncStatus: string | null;
+        stock: number | null;
+        rating: number | null;
+        reviewCount: number | null;
+        featured: boolean | null;
+      }>()
+
+      try {
+        const localProducts = await db.product.findMany({
+          where: {
+            shopifyId: { not: null },
+          },
+          select: {
+            shopifyId: true,
+            images: true,
+            occasions: true,
+            recipientTypes: true,
+            relationships: true,
+            deliveryEstimate: true,
+            platform: true,
+            isExternal: true,
+            sourceUrl: true,
+            affiliateUrl: true,
+            commission: true,
+            syncStatus: true,
+            stock: true,
+            rating: true,
+            reviewCount: true,
+            featured: true,
+          },
         })
+        for (const lp of localProducts) {
+          if (lp.shopifyId) {
+            map.set(lp.shopifyId, {
+              images: lp.images,
+              occasions: lp.occasions,
+              recipientTypes: lp.recipientTypes,
+              relationships: lp.relationships,
+              deliveryEstimate: lp.deliveryEstimate,
+              platform: lp.platform,
+              isExternal: lp.isExternal,
+              sourceUrl: lp.sourceUrl,
+              affiliateUrl: lp.affiliateUrl,
+              commission: lp.commission,
+              syncStatus: lp.syncStatus,
+              stock: lp.stock,
+              rating: lp.rating,
+              reviewCount: lp.reviewCount,
+              featured: lp.featured,
+            })
+          }
+        }
+        setCache(cacheKeyLocalEnrichment, map)
+      } catch {
+        // Local DB enrichment is optional
       }
-    }
-  } catch {
-    // Local DB enrichment is optional
-  }
+      return map
+    })(),
+    (async () => {
+      // Also fetch local-only products (added via admin, no shopifyId)
+      const localOnlyProducts: Array<any> = []
+      try {
+        const localOnlyWhere: Record<string, unknown> = {
+          shopifyId: null,
+          isExternal: false,
+        }
+        if (category) {
+          localOnlyWhere.category = { slug: category }
+        }
+        const localOnly = await db.product.findMany({
+          where: localOnlyWhere,
+          include: { category: true },
+          orderBy: { createdAt: 'desc' },
+        })
+        for (const lp of localOnly) {
+          localOnlyProducts.push({
+            id: lp.id,
+            name: lp.name,
+            slug: lp.slug,
+            description: lp.description,
+            price: lp.price,
+            compareAtPrice: lp.compareAtPrice,
+            images: JSON.parse(lp.images || '[]') as string[],
+            category: lp.category.name,
+            categorySlug: lp.category.slug,
+            stock: lp.stock,
+            rating: lp.rating,
+            reviewCount: lp.reviewCount,
+            featured: lp.featured,
+            tags: JSON.parse(lp.tags || '[]') as string[],
+            occasions: JSON.parse(lp.occasions || '[]') as string[],
+            recipientTypes: JSON.parse(lp.recipientTypes || '[]') as string[],
+            relationships: JSON.parse(lp.relationships || '[]') as string[],
+            deliveryEstimate: lp.deliveryEstimate || null,
+            platform: lp.platform,
+            isExternal: lp.isExternal,
+            sourceUrl: lp.sourceUrl,
+            affiliateUrl: lp.affiliateUrl,
+            platformLogo: null,
+            commission: lp.commission,
+            syncStatus: lp.syncStatus,
+            shopifyId: null,
+            shopifyVariantId: null,
+            source: 'local' as const,
+            createdAt: lp.createdAt,
+          })
+        }
+      } catch {
+        // Local-only products fetch is optional
+      }
+      return localOnlyProducts
+    })(),
+  ])
 
-  // Also fetch local-only products (added via admin, no shopifyId) so they appear alongside Shopify products
-  const localOnlyProducts: Array<any> = []
-  try {
-    const localOnlyWhere: Record<string, unknown> = {
-      shopifyId: null,
-      isExternal: false,
-    }
-    // Filter by category slug if specified
-    if (category) {
-      localOnlyWhere.category = { slug: category }
-    }
-    const localOnly = await db.product.findMany({
-      where: localOnlyWhere,
-      include: { category: true },
-      orderBy: { createdAt: 'desc' },
-    })
-    for (const lp of localOnly) {
-      localOnlyProducts.push({
-        id: lp.id,
-        name: lp.name,
-        slug: lp.slug,
-        description: lp.description,
-        price: lp.price,
-        compareAtPrice: lp.compareAtPrice,
-        images: JSON.parse(lp.images || '[]') as string[],
-        category: lp.category.name,
-        categorySlug: lp.category.slug,
-        stock: lp.stock,
-        rating: lp.rating,
-        reviewCount: lp.reviewCount,
-        featured: lp.featured,
-        tags: JSON.parse(lp.tags || '[]') as string[],
-        occasions: JSON.parse(lp.occasions || '[]') as string[],
-        recipientTypes: JSON.parse(lp.recipientTypes || '[]') as string[],
-        relationships: JSON.parse(lp.relationships || '[]') as string[],
-        deliveryEstimate: lp.deliveryEstimate || null,
-        platform: lp.platform,
-        isExternal: lp.isExternal,
-        sourceUrl: lp.sourceUrl,
-        affiliateUrl: lp.affiliateUrl,
-        platformLogo: null,
-        commission: lp.commission,
-        syncStatus: lp.syncStatus,
-        shopifyId: null,
-        shopifyVariantId: null,
-        source: 'local' as const,
-        createdAt: lp.createdAt,
-      })
-    }
-  } catch {
-    // Local-only products fetch is optional
-  }
+  const localProductsMap = localProductsMapResult
+  const localOnlyProducts = localOnlyProductsResult
 
   // Map to output format
   const mapped = filtered.map((sp) =>
@@ -285,13 +385,29 @@ async function handleShopifySource(searchParams: URLSearchParams) {
     total,
     page,
     totalPages: Math.ceil(total / limit),
-  })
+  }, { headers: { 'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=120' } })
 }
 
 /**
  * Handle local DB sourced product fetching (original behavior, preserved)
+ * Returns empty results gracefully if DB tables don't exist yet.
  */
 async function handleLocalSource(searchParams: URLSearchParams) {
+  try {
+    return await handleLocalSourceInner(searchParams)
+  } catch (error: any) {
+    console.error('[products] Local source error:', error.message)
+    // Return empty results instead of crashing
+    return NextResponse.json({
+      products: [],
+      total: 0,
+      page: 1,
+      totalPages: 0,
+    })
+  }
+}
+
+async function handleLocalSourceInner(searchParams: URLSearchParams) {
   const category = searchParams.get('category')
   const search = searchParams.get('search')
   const minPrice = searchParams.get('minPrice')
@@ -449,11 +565,14 @@ async function handleLocalSource(searchParams: URLSearchParams) {
     total,
     page,
     totalPages: Math.ceil(total / limit),
-  })
+  }, { headers: { 'Cache-Control': 'public, s-maxage=30, stale-while-revalidate=60' } })
 }
 
 export async function GET(request: NextRequest) {
   try {
+    // Auto-seed on Vercel if database is empty
+    await ensureSeeded()
+
     const { searchParams } = new URL(request.url)
     const sourceParam = searchParams.get('source') // 'shopify' or 'local'
 
@@ -485,7 +604,18 @@ export async function GET(request: NextRequest) {
     // Default behavior: when Shopify is configured, try Shopify first then fall back to local DB
     if (isShopifyConfigured()) {
       try {
-        return await handleShopifySource(searchParams)
+        const shopifyResult = await handleShopifySource(searchParams)
+        const shopifyData = await shopifyResult.json()
+
+        // If Shopify returned products, return them as a fresh response
+        // (we already consumed the body via .json(), so we must create a new response)
+        if (shopifyData.products && shopifyData.products.length > 0) {
+          return NextResponse.json(shopifyData, { headers: { 'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=120' } })
+        }
+
+        // If Shopify returned 0 products for this category, fall through to local DB
+        // This ensures auto-seeded products always show up on Vercel
+        console.log('[products] Shopify returned 0 products for category, falling back to local DB')
       } catch (error) {
         console.error('Shopify fetch failed, falling back to local DB:', error)
         // Fall through to local DB
