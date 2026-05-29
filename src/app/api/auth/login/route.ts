@@ -2,9 +2,13 @@ import { NextRequest, NextResponse } from 'next/server';
 import bcrypt from 'bcryptjs';
 import { db } from '@/lib/db';
 import { createSession, generateToken } from '@/lib/sessions';
+import { ensureSeeded } from '@/lib/auto-seed';
 
 export async function POST(request: NextRequest) {
   try {
+    // Ensure database is seeded on Vercel (empty on cold starts)
+    await ensureSeeded();
+
     const body = await request.json();
     const { email, password } = body;
 

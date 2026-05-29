@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import bcrypt from 'bcryptjs';
 import { db } from '@/lib/db';
 import { createSession, generateToken } from '@/lib/sessions';
+import { ensureSeeded } from '@/lib/auto-seed';
 
 // Default permissions by role
 const DEFAULT_PERMISSIONS: Record<string, string[]> = {
@@ -37,6 +38,9 @@ const DEFAULT_PERMISSIONS: Record<string, string[]> = {
 
 export async function POST(request: NextRequest) {
   try {
+    // Ensure database is seeded on Vercel (empty on cold starts)
+    await ensureSeeded();
+
     const body = await request.json();
     const { email, name, password, role } = body;
 

@@ -1,9 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { verifyAuth } from '@/lib/auth';
+import { ensureSeeded } from '@/lib/auto-seed';
 
 export async function GET(request: NextRequest) {
   try {
+    // Ensure database is seeded on Vercel (empty on cold starts)
+    await ensureSeeded();
+
     const user = await verifyAuth(request);
 
     if (!user) {

@@ -3,6 +3,7 @@ import { db } from '@/lib/db';
 import { checkRateLimit, getClientIp, rateLimitResponse } from '@/lib/rate-limiter';
 import { validateInput, forgotPasswordSchema } from '@/lib/validations/auth';
 import { addApiLog, getClientIpFromRequest } from '@/lib/api-logger';
+import { ensureSeeded } from '@/lib/auto-seed';
 
 export async function POST(request: NextRequest) {
   const startTime = Date.now();
@@ -10,6 +11,9 @@ export async function POST(request: NextRequest) {
   const userAgent = request.headers.get('user-agent') || 'unknown';
 
   try {
+    // Ensure database is seeded on Vercel (empty on cold starts)
+    await ensureSeeded();
+
     // Rate limiting
     const rateLimit = checkRateLimit('forgot-password', ip);
     if (!rateLimit.allowed) {
