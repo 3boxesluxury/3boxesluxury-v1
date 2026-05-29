@@ -3,39 +3,70 @@
  *
  * On Vercel, SQLite is ephemeral — the database resets on every cold start.
  * This module automatically:
- *   1. Creates the database schema (if tables don't exist)
+ *   1. Creates the database schema using `prisma db push` (if tables don't exist)
  *   2. Seeds the database on the first API request if it detects zero categories
  *
- * It uses a lightweight seed (categories + products only) to keep
- * cold-start time reasonable.
+ * Using `prisma db push` instead of raw SQL ensures the schema always matches
+ * the Prisma schema.prisma exactly — no missing tables or column mismatches.
  */
 
 import { db } from './db'
+import { execSync } from 'child_process'
 
 let seedPromise: Promise<void> | null = null
 let isSeeded = false
 let schemaEnsured = false
 
 /**
- * Create the essential database tables using raw SQL.
- * On Vercel, the database at /tmp is empty on cold starts —
- * we need to create the schema before we can seed.
+ * Create the database schema using Prisma's own db push mechanism.
+ * This ensures 100% parity with schema.prisma — no missing tables or columns.
  */
 async function ensureSchema(): Promise<void> {
   if (schemaEnsured) return
 
-  // Check if the Category table already exists
+  // Quick check: does the Category table already exist?
   try {
     await db.$queryRaw`SELECT 1 FROM Category LIMIT 1`
     schemaEnsured = true
     return
   } catch {
-    // Table doesn't exist — create the schema
+    // Table doesn't exist — need to create schema
   }
 
-  console.log('[auto-seed] Creating database schema...')
+  console.log('[auto-seed] Creating database schema via prisma db push...')
 
-  // Create essential tables (matching the Prisma schema)
+  try {
+    // On Vercel, DATABASE_URL points to /tmp/3boxes-dev.db
+    // We need to push the schema to that database
+    const dbUrl = process.env.DATABASE_URL
+    console.log(`[auto-seed] Pushing schema to: ${dbUrl}`)
+
+    // Run prisma db push — this creates all tables from schema.prisma
+    execSync('npx prisma db push --skip-generate --accept-data-loss 2>&1', {
+      env: { ...process.env, DATABASE_URL: dbUrl },
+      stdio: 'pipe',
+      timeout: 30000,
+    })
+
+    schemaEnsured = true
+    console.log('[auto-seed] Schema created successfully via prisma db push')
+  } catch (pushError: any) {
+    console.error('[auto-seed] prisma db push failed, falling back to raw SQL:', pushError.message)
+
+    // Fallback: create essential tables with raw SQL
+    // This is a simplified version covering only the tables needed for login/seed
+    await createEssentialTablesRaw()
+    schemaEnsured = true
+    console.log('[auto-seed] Schema created via raw SQL fallback')
+  }
+}
+
+/**
+ * Fallback: create essential tables using raw SQL.
+ * Only covers tables needed for basic functionality (login, categories, products).
+ * Other tables will be created if prisma db push succeeds on next cold start.
+ */
+async function createEssentialTablesRaw(): Promise<void> {
   await db.$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS Category (
       id TEXT NOT NULL PRIMARY KEY,
@@ -95,9 +126,6 @@ async function ensureSchema(): Promise<void> {
 
   await db.$executeRawUnsafe(`
     CREATE INDEX IF NOT EXISTS Product_categoryId_idx ON Product(categoryId);
-  `)
-  await db.$executeRawUnsafe(`
-    CREATE INDEX IF NOT EXISTS Product_shopifyId_idx ON Product(shopifyId);
   `)
   await db.$executeRawUnsafe(`
     CREATE INDEX IF NOT EXISTS Product_slug_idx ON Product(slug);
@@ -168,6 +196,32 @@ async function ensureSchema(): Promise<void> {
   `)
 
   await db.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS UserPermission (
+      id TEXT NOT NULL PRIMARY KEY,
+      userId TEXT NOT NULL,
+      permission TEXT NOT NULL,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (userId) REFERENCES User(id),
+      UNIQUE(userId, permission)
+    );
+  `)
+
+  await db.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS AuditLog (
+      id TEXT NOT NULL PRIMARY KEY,
+      userId TEXT,
+      action TEXT NOT NULL,
+      entity TEXT,
+      entityId TEXT,
+      details TEXT,
+      ipAddress TEXT,
+      userAgent TEXT,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (userId) REFERENCES User(id)
+    );
+  `)
+
+  await db.$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS Cart (
       id TEXT NOT NULL PRIMARY KEY,
       sessionId TEXT NOT NULL UNIQUE,
@@ -206,10 +260,6 @@ async function ensureSchema(): Promise<void> {
   `)
 
   await db.$executeRawUnsafe(`
-    CREATE INDEX IF NOT EXISTS WishlistItem_userId_idx ON WishlistItem(userId);
-  `)
-
-  await db.$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS ProductVariant (
       id TEXT NOT NULL PRIMARY KEY,
       productId TEXT NOT NULL,
@@ -226,10 +276,6 @@ async function ensureSchema(): Promise<void> {
       updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (productId) REFERENCES Product(id)
     );
-  `)
-
-  await db.$executeRawUnsafe(`
-    CREATE INDEX IF NOT EXISTS ProductVariant_productId_idx ON ProductVariant(productId);
   `)
 
   await db.$executeRawUnsafe(`
@@ -255,10 +301,6 @@ async function ensureSchema(): Promise<void> {
       phone TEXT,
       address TEXT,
       gstNumber TEXT,
-      panNumber TEXT,
-      bankName TEXT,
-      bankAccount TEXT,
-      ifscCode TEXT,
       isActive BOOLEAN NOT NULL DEFAULT true,
       createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -343,10 +385,6 @@ async function ensureSchema(): Promise<void> {
   `)
 
   await db.$executeRawUnsafe(`
-    CREATE INDEX IF NOT EXISTS OrderItem_orderId_idx ON OrderItem(orderId);
-  `)
-
-  await db.$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS Review (
       id TEXT NOT NULL PRIMARY KEY,
       productId TEXT NOT NULL,
@@ -361,10 +399,6 @@ async function ensureSchema(): Promise<void> {
       updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (productId) REFERENCES Product(id)
     );
-  `)
-
-  await db.$executeRawUnsafe(`
-    CREATE INDEX IF NOT EXISTS Review_productId_idx ON Review(productId);
   `)
 
   await db.$executeRawUnsafe(`
@@ -398,156 +432,308 @@ async function ensureSchema(): Promise<void> {
     );
   `)
 
-  await db.$executeRawUnsafe(`
-    CREATE TABLE IF NOT EXISTS AuditLog (
+  // Create remaining tables that Prisma models reference
+  // These are needed so Prisma queries don't crash
+  const extraTables = [
+    `CREATE TABLE IF NOT EXISTS OrderTrackingEvent (
       id TEXT NOT NULL PRIMARY KEY,
-      userId TEXT,
-      action TEXT NOT NULL,
-      entity TEXT,
-      entityId TEXT,
-      details TEXT,
-      ipAddress TEXT,
-      userAgent TEXT,
-      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (userId) REFERENCES User(id)
-    );
-  `)
-
-  await db.$executeRawUnsafe(`
-    CREATE TABLE IF NOT EXISTS UserPermission (
+      orderId TEXT NOT NULL,
+      status TEXT NOT NULL,
+      description TEXT,
+      location TEXT,
+      timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (orderId) REFERENCES "Order"(id)
+    );`,
+    `CREATE TABLE IF NOT EXISTS PaymentSession (
       id TEXT NOT NULL PRIMARY KEY,
-      userId TEXT NOT NULL,
-      module TEXT,
-      permission TEXT,
-      canRead BOOLEAN NOT NULL DEFAULT false,
-      canWrite BOOLEAN NOT NULL DEFAULT false,
-      canEdit BOOLEAN NOT NULL DEFAULT false,
-      canDelete BOOLEAN NOT NULL DEFAULT false,
+      orderId TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      providerSessionId TEXT,
+      amount REAL NOT NULL,
+      currency TEXT NOT NULL DEFAULT 'INR',
+      status TEXT NOT NULL DEFAULT 'created',
+      paymentId TEXT,
+      method TEXT,
+      metadata TEXT,
       createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (userId) REFERENCES User(id)
-    );
-  `)
-
-  await db.$executeRawUnsafe(`
-    CREATE INDEX IF NOT EXISTS UserPermission_userId_idx ON UserPermission(userId);
-  `)
-
-  await db.$executeRawUnsafe(`
-    CREATE TABLE IF NOT EXISTS PaymentMethod (
+      FOREIGN KEY (orderId) REFERENCES "Order"(id)
+    );`,
+    `CREATE TABLE IF NOT EXISTS OrderInvoice (
       id TEXT NOT NULL PRIMARY KEY,
-      userId TEXT NOT NULL,
+      orderId TEXT NOT NULL UNIQUE,
+      invoiceNumber TEXT NOT NULL UNIQUE,
+      amount REAL NOT NULL,
+      tax REAL NOT NULL DEFAULT 0,
+      total REAL NOT NULL,
+      status TEXT NOT NULL DEFAULT 'generated',
+      pdfUrl TEXT,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (orderId) REFERENCES "Order"(id)
+    );`,
+    `CREATE TABLE IF NOT EXISTS InventoryLog (
+      id TEXT NOT NULL PRIMARY KEY,
+      productId TEXT NOT NULL,
       type TEXT NOT NULL,
-      label TEXT NOT NULL,
+      quantity INTEGER NOT NULL,
+      note TEXT,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (productId) REFERENCES Product(id)
+    );`,
+    `CREATE TABLE IF NOT EXISTS PaymentMethod (
+      id TEXT NOT NULL PRIMARY KEY,
+      type TEXT NOT NULL,
+      provider TEXT,
       last4 TEXT,
       isDefault BOOLEAN NOT NULL DEFAULT false,
-      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (userId) REFERENCES User(id)
-    );
-  `)
-
-  await db.$executeRawUnsafe(`
-    CREATE TABLE IF NOT EXISTS SupportTicket (
+      userId TEXT,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );`,
+    `CREATE TABLE IF NOT EXISTS WikiDocument (
       id TEXT NOT NULL PRIMARY KEY,
       title TEXT NOT NULL,
-      description TEXT NOT NULL,
-      category TEXT NOT NULL DEFAULT 'general',
-      priority TEXT NOT NULL DEFAULT 'medium',
-      status TEXT NOT NULL DEFAULT 'open',
-      creatorId TEXT NOT NULL,
-      assigneeId TEXT,
-      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (creatorId) REFERENCES User(id),
-      FOREIGN KEY (assigneeId) REFERENCES User(id)
-    );
-  `)
-
-  await db.$executeRawUnsafe(`
-    CREATE TABLE IF NOT EXISTS SupportTicketMessage (
-      id TEXT NOT NULL PRIMARY KEY,
-      ticketId TEXT NOT NULL,
-      senderId TEXT NOT NULL,
-      senderName TEXT NOT NULL,
       content TEXT NOT NULL,
-      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (ticketId) REFERENCES SupportTicket(id),
-      FOREIGN KEY (senderId) REFERENCES User(id)
-    );
-  `)
-
-  await db.$executeRawUnsafe(`
-    CREATE TABLE IF NOT EXISTS WikiDocument (
-      id TEXT NOT NULL PRIMARY KEY,
-      title TEXT NOT NULL,
-      slug TEXT NOT NULL UNIQUE,
       category TEXT,
-      content TEXT NOT NULL,
-      version TEXT,
-      isPublished BOOLEAN NOT NULL DEFAULT false,
-      accessRoles TEXT,
+      createdBy TEXT,
       createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-    );
-  `)
-
-  await db.$executeRawUnsafe(`
-    CREATE TABLE IF NOT EXISTS Invoice (
+    );`,
+    `CREATE TABLE IF NOT EXISTS AgentDocShare (
       id TEXT NOT NULL PRIMARY KEY,
-      invoiceNumber TEXT NOT NULL UNIQUE,
+      agentId TEXT NOT NULL,
+      docId TEXT NOT NULL,
+      sharedBy TEXT NOT NULL,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );`,
+    `CREATE TABLE IF NOT EXISTS SupportTicket (
+      id TEXT NOT NULL PRIMARY KEY,
+      subject TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'open',
+      priority TEXT NOT NULL DEFAULT 'medium',
       userId TEXT,
-      customerName TEXT NOT NULL,
-      customerEmail TEXT NOT NULL,
-      customerPhone TEXT,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );`,
+    `CREATE TABLE IF NOT EXISTS SupportTicketMessage (
+      id TEXT NOT NULL PRIMARY KEY,
+      ticketId TEXT NOT NULL,
+      senderId TEXT,
+      message TEXT NOT NULL,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (ticketId) REFERENCES SupportTicket(id)
+    );`,
+    `CREATE TABLE IF NOT EXISTS AffiliateClick (
+      id TEXT NOT NULL PRIMARY KEY,
+      productId TEXT NOT NULL,
+      platform TEXT NOT NULL,
+      sourceUrl TEXT,
+      referralCode TEXT,
+      ipAddress TEXT,
+      userAgent TEXT,
+      clickedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );`,
+    `CREATE TABLE IF NOT EXISTS PlatformIntegration (
+      id TEXT NOT NULL PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      slug TEXT NOT NULL UNIQUE,
+      baseUrl TEXT NOT NULL,
+      logo TEXT,
+      isActive BOOLEAN NOT NULL DEFAULT true,
+      autoSync BOOLEAN NOT NULL DEFAULT true,
+      syncInterval INTEGER NOT NULL DEFAULT 3600,
+      lastSyncedAt DATETIME,
+      syncStatus TEXT NOT NULL DEFAULT 'idle',
+      lastSyncError TEXT,
+      categories TEXT NOT NULL DEFAULT '[]',
+      affiliateTag TEXT,
+      commission REAL NOT NULL DEFAULT 0,
+      maxProducts INTEGER NOT NULL DEFAULT 500,
+      productCount INTEGER NOT NULL DEFAULT 0,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );`,
+    `CREATE TABLE IF NOT EXISTS SyncLog (
+      id TEXT NOT NULL PRIMARY KEY,
+      integrationId TEXT NOT NULL,
+      type TEXT NOT NULL,
+      status TEXT NOT NULL,
+      productsFound INTEGER NOT NULL DEFAULT 0,
+      productsAdded INTEGER NOT NULL DEFAULT 0,
+      productsUpdated INTEGER NOT NULL DEFAULT 0,
+      productsRemoved INTEGER NOT NULL DEFAULT 0,
+      error TEXT,
+      startedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      completedAt DATETIME,
+      FOREIGN KEY (integrationId) REFERENCES PlatformIntegration(id)
+    );`,
+    `CREATE TABLE IF NOT EXISTS PartnerCategoryMap (
+      id TEXT NOT NULL PRIMARY KEY,
+      integrationId TEXT NOT NULL,
+      partnerCatName TEXT NOT NULL,
+      partnerCatSlug TEXT NOT NULL,
+      localCatId TEXT,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (integrationId) REFERENCES PlatformIntegration(id),
+      UNIQUE(integrationId, partnerCatSlug)
+    );`,
+    `CREATE TABLE IF NOT EXISTS CorporateAccount (
+      id TEXT NOT NULL PRIMARY KEY,
+      companyName TEXT NOT NULL,
+      slug TEXT NOT NULL UNIQUE,
+      industry TEXT,
+      website TEXT,
+      gstNumber TEXT,
+      panNumber TEXT,
       billingAddress TEXT,
-      subtotal REAL NOT NULL,
-      tax REAL NOT NULL DEFAULT 0,
-      shipping REAL NOT NULL DEFAULT 0,
-      discount REAL NOT NULL DEFAULT 0,
-      total REAL NOT NULL,
-      status TEXT NOT NULL DEFAULT 'draft',
-      paidAt DATETIME,
-      dueDate DATETIME,
+      billingCity TEXT,
+      billingState TEXT,
+      billingZipCode TEXT,
+      billingCountry TEXT NOT NULL DEFAULT 'India',
+      contactName TEXT NOT NULL,
+      contactEmail TEXT NOT NULL,
+      contactPhone TEXT,
+      address TEXT,
+      city TEXT,
+      state TEXT,
+      zipCode TEXT,
+      country TEXT NOT NULL DEFAULT 'India',
+      logo TEXT,
+      userId TEXT NOT NULL UNIQUE,
+      approvalStatus TEXT NOT NULL DEFAULT 'pending',
+      isActive BOOLEAN NOT NULL DEFAULT true,
+      creditLimit REAL NOT NULL DEFAULT 0,
+      creditUsed REAL NOT NULL DEFAULT 0,
+      discountPercent REAL NOT NULL DEFAULT 0,
+      notes TEXT,
       createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (userId) REFERENCES User(id)
-    );
-  `)
-
-  await db.$executeRawUnsafe(`
-    CREATE TABLE IF NOT EXISTS InvoiceItem (
+    );`,
+    `CREATE TABLE IF NOT EXISTS CorporateMember (
+      id TEXT NOT NULL PRIMARY KEY,
+      corporateId TEXT NOT NULL,
+      userId TEXT,
+      email TEXT NOT NULL,
+      name TEXT,
+      role TEXT NOT NULL DEFAULT 'campaign_manager',
+      status TEXT NOT NULL DEFAULT 'pending',
+      invitedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      joinedAt DATETIME,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (corporateId) REFERENCES CorporateAccount(id),
+      UNIQUE(corporateId, email)
+    );`,
+    `CREATE TABLE IF NOT EXISTS CorporateBranding (
+      id TEXT NOT NULL PRIMARY KEY,
+      corporateId TEXT NOT NULL UNIQUE,
+      logoUrl TEXT,
+      primaryColor TEXT,
+      secondaryColor TEXT,
+      customMessage TEXT,
+      packagingType TEXT NOT NULL DEFAULT 'standard',
+      giftWrapStyle TEXT,
+      includeBranding BOOLEAN NOT NULL DEFAULT true,
+      hidePrice BOOLEAN NOT NULL DEFAULT true,
+      cardTemplate TEXT,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (corporateId) REFERENCES CorporateAccount(id)
+    );`,
+    `CREATE TABLE IF NOT EXISTS CorporateCampaign (
+      id TEXT NOT NULL PRIMARY KEY,
+      corporateId TEXT NOT NULL,
+      name TEXT NOT NULL,
+      occasion TEXT,
+      description TEXT,
+      budgetPerRecipient REAL,
+      totalBudget REAL,
+      status TEXT NOT NULL DEFAULT 'draft',
+      deliveryType TEXT NOT NULL DEFAULT 'bulk',
+      deliveryDate DATETIME,
+      message TEXT,
+      productId TEXT,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (corporateId) REFERENCES CorporateAccount(id),
+      FOREIGN KEY (productId) REFERENCES Product(id)
+    );`,
+    `CREATE TABLE IF NOT EXISTS CampaignRecipient (
+      id TEXT NOT NULL PRIMARY KEY,
+      campaignId TEXT NOT NULL,
+      name TEXT NOT NULL,
+      email TEXT NOT NULL,
+      phone TEXT,
+      designation TEXT,
+      department TEXT,
+      address TEXT,
+      city TEXT,
+      state TEXT,
+      zipCode TEXT,
+      productId TEXT,
+      budget REAL,
+      message TEXT,
+      giftStatus TEXT NOT NULL DEFAULT 'pending',
+      orderId TEXT,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (campaignId) REFERENCES CorporateCampaign(id),
+      FOREIGN KEY (productId) REFERENCES Product(id)
+    );`,
+    `CREATE TABLE IF NOT EXISTS GeoCountry (
+      id TEXT NOT NULL PRIMARY KEY,
+      code TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      currencyCode TEXT NOT NULL,
+      languageCode TEXT NOT NULL DEFAULT 'en',
+      flagEmoji TEXT
+    );`,
+    `CREATE TABLE IF NOT EXISTS Invoice (
+      id TEXT NOT NULL PRIMARY KEY,
+      invoiceNumber TEXT NOT NULL UNIQUE,
+      vendorId TEXT,
+      orderId TEXT,
+      amount REAL NOT NULL,
+      tax REAL NOT NULL DEFAULT 0,
+      total REAL NOT NULL,
+      status TEXT NOT NULL DEFAULT 'draft',
+      dueDate DATETIME,
+      paidDate DATETIME,
+      notes TEXT,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (vendorId) REFERENCES Vendor(id)
+    );`,
+    `CREATE TABLE IF NOT EXISTS InvoiceItem (
       id TEXT NOT NULL PRIMARY KEY,
       invoiceId TEXT NOT NULL,
-      productName TEXT NOT NULL,
-      productNumber TEXT,
+      description TEXT NOT NULL,
       quantity INTEGER NOT NULL DEFAULT 1,
       unitPrice REAL NOT NULL,
-      total REAL NOT NULL,
-      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      amount REAL NOT NULL,
       FOREIGN KEY (invoiceId) REFERENCES Invoice(id)
-    );
-  `)
-
-  await db.$executeRawUnsafe(`
-    CREATE TABLE IF NOT EXISTS AccountEntry (
+    );`,
+    `CREATE TABLE IF NOT EXISTS AccountEntry (
       id TEXT NOT NULL PRIMARY KEY,
       entryNumber TEXT NOT NULL UNIQUE,
       type TEXT NOT NULL,
       category TEXT NOT NULL,
       amount REAL NOT NULL,
-      description TEXT,
-      referenceId TEXT,
-      referenceType TEXT,
-      vendorId TEXT,
-      date DATETIME NOT NULL,
-      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-    );
-  `)
+      description TEXT NOT NULL,
+      reference TEXT,
+      createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );`,
+  ]
 
-  schemaEnsured = true
-  console.log('[auto-seed] Schema created successfully')
+  for (const sql of extraTables) {
+    try {
+      await db.$executeRawUnsafe(sql)
+    } catch (err: any) {
+      // Log but don't fail — some tables may already exist from prisma db push
+      console.warn(`[auto-seed] Warning creating table: ${err.message?.substring(0, 80)}`)
+    }
+  }
 }
 
 const CATEGORIES = [
@@ -569,7 +755,7 @@ const PRODUCTS = [
   // Fragrances
   { name: "Ajmal Oud of Dubai Eau de Parfum 100ml", slug: "ajmal-oud-of-dubai-eau-de-parfum-100ml", description: "Rich, warm, and deeply sensual Eau de Parfum capturing the soul of the Arabian Peninsula.", price: 4999.0, compareAtPrice: 5999.0, images: '["https://cdn.shopify.com/s/files/1/0674/7327/7150/files/716juhp9cAL._SL1500.jpg?v=1777487051"]', categorySlug: "fragrances", stock: 0, rating: 4.7, reviewCount: 25, featured: false, tags: '["ajmal","eau de parfum","gift","luxury perfume","oud"]' },
   // Jewelry
-  { name: "Amara Heart Locket Necklace – 18K Gold-Tone Engraved Heart Pendant", slug: "amara-heart-locket-necklace-18k-gold-tone", description: "A beautifully engraved gold-tone heart locket pendant with an intricate swirl motif, suspended on a sleek snake chain.", price: 799.0, compareAtPrice: 999.0, images: '["https://cdn.shopify.com/s/files/1/0674/7327/7150/files/51BqqEpXlZL._SY695.jpg?v=1776837923"]', categorySlug: "jewelry", stock: 10, rating: 4.7, reviewCount: 25, featured: false, tags: null },
+  { name: "Amara Heart Locket Necklace - 18K Gold-Tone Engraved Heart Pendant", slug: "amara-heart-locket-necklace-18k-gold-tone", description: "A beautifully engraved gold-tone heart locket pendant with an intricate swirl motif, suspended on a sleek snake chain.", price: 799.0, compareAtPrice: 999.0, images: '["https://cdn.shopify.com/s/files/1/0674/7327/7150/files/51BqqEpXlZL._SY695.jpg?v=1776837923"]', categorySlug: "jewelry", stock: 10, rating: 4.7, reviewCount: 25, featured: false, tags: null },
   { name: "Radiant Rose Gold Diamond Stud Earrings", slug: "radiant-rose-gold-diamond-stud-earrings", description: "Elegant rose gold stud earrings featuring brilliant-cut diamonds.", price: 2499.0, compareAtPrice: 3299.0, images: '["https://cdn.shopify.com/s/files/1/0674/7327/7150/files/earring1.jpg"]', categorySlug: "jewelry", stock: 8, rating: 4.5, reviewCount: 18, featured: true, tags: '["earrings","diamond","rose gold"]' },
   // Leather Goods
   { name: "Vintage Brown Leather Wallet", slug: "vintage-brown-leather-wallet", description: "Handcrafted premium leather wallet with RFID protection.", price: 1299.0, compareAtPrice: 1599.0, images: '["https://cdn.shopify.com/s/files/1/0674/7327/7150/files/wallet1.jpg"]', categorySlug: "leather-goods", stock: 15, rating: 4.3, reviewCount: 12, featured: false, tags: '["wallet","leather","RFID"]' },
@@ -580,20 +766,20 @@ const PRODUCTS = [
   // Romantic Gifts
   { name: "Love & Roses Gift Hamper", slug: "love-roses-gift-hamper", description: "Premium gift hamper with roses, chocolates, and scented candles.", price: 2499.0, compareAtPrice: 2999.0, images: '["https://cdn.shopify.com/s/files/1/0674/7327/7150/files/hamper1.jpg"]', categorySlug: "romantic-gifts", stock: 7, rating: 4.9, reviewCount: 35, featured: true, tags: '["romantic","gift hamper","roses"]' },
   // Fashion
-  { name: "Silk Evening Clutch – Gold", slug: "silk-evening-clutch-gold", description: "Elegant silk clutch with gold-tone hardware.", price: 1599.0, compareAtPrice: 1999.0, images: '["https://cdn.shopify.com/s/files/1/0674/7327/7150/files/clutch1.jpg"]', categorySlug: "fashion", stock: 9, rating: 4.4, reviewCount: 15, featured: false, tags: '["clutch","silk","evening bag"]' },
+  { name: "Silk Evening Clutch - Gold", slug: "silk-evening-clutch-gold", description: "Elegant silk clutch with gold-tone hardware.", price: 1599.0, compareAtPrice: 1999.0, images: '["https://cdn.shopify.com/s/files/1/0674/7327/7150/files/clutch1.jpg"]', categorySlug: "fashion", stock: 9, rating: 4.4, reviewCount: 15, featured: false, tags: '["clutch","silk","evening bag"]' },
   // Watches
   { name: "Chronos Automatic Dress Watch", slug: "chronos-automatic-dress-watch", description: "Swiss-inspired automatic dress watch with sapphire crystal.", price: 8999.0, compareAtPrice: 11999.0, images: '["https://cdn.shopify.com/s/files/1/0674/7327/7150/files/watch1.jpg"]', categorySlug: "watches", stock: 3, rating: 4.9, reviewCount: 42, featured: true, tags: '["automatic","dress watch","sapphire"]' },
   // Sarees
-  { name: "Banarasi Silk Saree – Royal Blue", slug: "banarasi-silk-saree-royal-blue", description: "Handwoven Banarasi silk saree with gold zari work.", price: 6999.0, compareAtPrice: 8999.0, images: '["https://cdn.shopify.com/s/files/1/0674/7327/7150/files/saree1.jpg"]', categorySlug: "sarees", stock: 5, rating: 4.8, reviewCount: 28, featured: true, tags: '["banarasi","silk saree","zari"]' },
+  { name: "Banarasi Silk Saree - Royal Blue", slug: "banarasi-silk-saree-royal-blue", description: "Handwoven Banarasi silk saree with gold zari work.", price: 6999.0, compareAtPrice: 8999.0, images: '["https://cdn.shopify.com/s/files/1/0674/7327/7150/files/saree1.jpg"]', categorySlug: "sarees", stock: 5, rating: 4.8, reviewCount: 28, featured: true, tags: '["banarasi","silk saree","zari"]' },
   // Men's Shirts
   { name: "Premium White Egyptian Cotton Shirt", slug: "premium-white-egyptian-cotton-shirt", description: "Luxurious Egyptian cotton formal shirt with mother-of-pearl buttons.", price: 2499.0, compareAtPrice: 3299.0, images: '["https://cdn.shopify.com/s/files/1/0674/7327/7150/files/shirt1.jpg"]', categorySlug: "mens-shirts", stock: 12, rating: 4.5, reviewCount: 22, featured: false, tags: '["egyptian cotton","formal shirt","white"]' },
   // Toys
-  { name: "Luxury Chess Set – Rosewood & Maple", slug: "luxury-chess-set-rosewood-maple", description: "Handcrafted wooden chess set with weighted pieces.", price: 3499.0, compareAtPrice: 4499.0, images: '["https://cdn.shopify.com/s/files/1/0674/7327/7150/files/chess1.jpg"]', categorySlug: "toys", stock: 4, rating: 4.7, reviewCount: 16, featured: false, tags: '["chess","wooden","luxury game"]' },
+  { name: "Luxury Chess Set - Rosewood & Maple", slug: "luxury-chess-set-rosewood-maple", description: "Handcrafted wooden chess set with weighted pieces.", price: 3499.0, compareAtPrice: 4499.0, images: '["https://cdn.shopify.com/s/files/1/0674/7327/7150/files/chess1.jpg"]', categorySlug: "toys", stock: 4, rating: 4.7, reviewCount: 16, featured: false, tags: '["chess","wooden","luxury game"]' },
 ]
 
 // Password hashes generated with bcryptjs, salt rounds 10
-// admin123 → for admin account
-// user123  → for demo user account
+// admin123 -> for admin, agent, team accounts
+// user123  -> for demo user account
 const DEMO_USERS = [
   { email: 'admin@3boxesluxury.com', name: 'Admin', password: '$2b$10$e9AuzJsvSUtdPEjYshqskuiaRXQxKt9T.Stf/fSrbJ24dDQfKBY.K', role: 'admin', isActive: true, approvalStatus: 'approved', emailVerified: true, phoneVerified: true, twoFactorEnabled: false },
   { email: 'user@3boxesluxury.com', name: 'User', password: '$2b$10$CD3bZ.ApSzllzp/NgpTz1.ZNbs7sfJUuMAB4DJ/LC6hv0HLcW7XNa', role: 'user', isActive: true, approvalStatus: 'approved', emailVerified: true, phoneVerified: false, twoFactorEnabled: false },
