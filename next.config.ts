@@ -1,7 +1,6 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  output: "standalone",
   typescript: {
     ignoreBuildErrors: true,
   },
@@ -39,6 +38,23 @@ const nextConfig: NextConfig = {
           {
             key: 'Expires',
             value: '0',
+          },
+          {
+            key: 'Service-Worker-Allowed',
+            value: '/',
+          },
+        ],
+      },
+      {
+        source: '/manifest.json',
+        headers: [
+          {
+            key: 'Cache-Control',
+            value: 'public, max-age=3600',
+          },
+          {
+            key: 'Content-Type',
+            value: 'application/manifest+json',
           },
         ],
       },

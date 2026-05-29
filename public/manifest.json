@@ -39,22 +39,6 @@
       "purpose": "maskable"
     }
   ],
-  "screenshots": [
-    {
-      "src": "/screenshots/screenshot-mobile.png",
-      "sizes": "768x1344",
-      "type": "image/png",
-      "form_factor": "narrow",
-      "label": "3 BOXES LUXURY mobile shopping experience"
-    },
-    {
-      "src": "/screenshots/screenshot-desktop.png",
-      "sizes": "1344x768",
-      "type": "image/png",
-      "form_factor": "wide",
-      "label": "3 BOXES LUXURY desktop shopping experience"
-    }
-  ],
   "shortcuts": [
     {
       "name": "Shop All",
