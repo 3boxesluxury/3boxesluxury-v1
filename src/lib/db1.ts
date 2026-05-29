@@ -1,12 +1,5 @@
 import { PrismaClient } from '@prisma/client'
 
-// On Vercel, the serverless filesystem is read-only.
-// SQLite needs a writable location, so we use /tmp for the database.
-// The auto-seed module will create the schema and seed data on first request.
-if (process.env.VERCEL === '1') {
-  process.env.DATABASE_URL = 'file:/tmp/3boxes-dev.db';
-}
-
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined
 }
