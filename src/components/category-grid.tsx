@@ -62,15 +62,47 @@ const SCROLL_ITEMS = [
   { key: 'new-arrivals', label: 'New Arrivals', icon: <Sparkles className="h-5 w-5" />, bg: 'from-amber-900/40 to-stone-900/60' },
 ];
 
-/* ── Sub-Category Mapping: Parent → Sub-category slugs ── */
-const SUB_CATEGORY_MAP: Record<string, string[]> = {
-  couple: ['couple-gifts', 'romantic-gifts', 'fragrances', 'jewelry', 'watches'],
-  men: ['mens-shirts', 'fragrances', 'leather-goods', 'watches', 'jewelry'],
-  women: ['sarees', 'fragrances', 'jewelry', 'watches', 'fashion'],
-  kids: ['toys', 'fashion', 'home-living'],
-  home: ['home-living', 'fragrances', 'leather-goods', 'fashion'],
-  office: ['leather-goods', 'watches', 'fashion', 'home-living'],
-  // 'new-arrivals' is handled dynamically — fetched from API
+/* ── HARDCODED Sub-Category Data: Parent → full subcategory info ── */
+/* This ensures subcategories ALWAYS display, even if the API is down or empty */
+const HARDCODED_SUBCATEGORIES: Record<string, Category[]> = {
+  couple: [
+    { id: 'cat-couple-gifts', name: "Couple Friendly Gifts", slug: 'couple-gifts', description: 'Gift experiences for couples to share together', image: '/images/categories/couple.jpg', productCount: 0 },
+    { id: 'cat-romantic-gifts', name: "Romantic Gifts", slug: 'romantic-gifts', description: 'Thoughtful gift experiences to express your love', image: '/images/categories/romantic.jpg', productCount: 0 },
+    { id: 'cat-fragrances-c', name: "Fragrance", slug: 'fragrances', description: 'Signature scents from the world\'s finest perfumers', image: '/images/categories/fragrances.jpg', productCount: 0 },
+    { id: 'cat-jewelry-c', name: "Jewelry", slug: 'jewelry', description: 'Exquisite jewelry crafted with precious stones and metals', image: '/images/categories/jewelry.jpg', productCount: 0 },
+    { id: 'cat-watches-c', name: "Watches", slug: 'watches', description: 'Luxury timepieces from world-renowned makers', image: '/images/categories/watches.jpg', productCount: 0 },
+  ],
+  men: [
+    { id: 'cat-mens-shirts', name: "Men's Shirts & T-Shirts", slug: 'mens-shirts', description: 'Premium shirts and t-shirts for the modern gentleman', image: '/images/categories/mens-shirts.jpg', productCount: 0 },
+    { id: 'cat-fragrances-m', name: "Fragrance", slug: 'fragrances', description: 'Signature scents from the world\'s finest perfumers', image: '/images/categories/fragrances.jpg', productCount: 0 },
+    { id: 'cat-leather-goods-m', name: "Leather Goods", slug: 'leather-goods', description: 'Premium leather bags, wallets, and accessories', image: '/images/categories/leather.jpg', productCount: 0 },
+    { id: 'cat-watches-m', name: "Watches", slug: 'watches', description: 'Luxury timepieces from world-renowned makers', image: '/images/categories/watches.jpg', productCount: 0 },
+    { id: 'cat-jewelry-m', name: "Jewelry", slug: 'jewelry', description: 'Exquisite jewelry crafted with precious stones and metals', image: '/images/categories/jewelry.jpg', productCount: 0 },
+  ],
+  women: [
+    { id: 'cat-sarees', name: "Saree", slug: 'sarees', description: 'Handwoven silk and designer sarees for every occasion', image: '/images/categories/sarees.jpg', productCount: 0 },
+    { id: 'cat-fragrances-w', name: "Fragrance", slug: 'fragrances', description: 'Signature scents from the world\'s finest perfumers', image: '/images/categories/fragrances.jpg', productCount: 0 },
+    { id: 'cat-jewelry-w', name: "Jewelry", slug: 'jewelry', description: 'Exquisite jewelry crafted with precious stones and metals', image: '/images/categories/jewelry.jpg', productCount: 0 },
+    { id: 'cat-watches-w', name: "Watches", slug: 'watches', description: 'Luxury timepieces from world-renowned makers', image: '/images/categories/watches.jpg', productCount: 0 },
+    { id: 'cat-fashion-w', name: "Fashion", slug: 'fashion', description: 'Designer clothing and haute couture collections', image: '/images/categories/fashion.jpg', productCount: 0 },
+  ],
+  kids: [
+    { id: 'cat-toys', name: "Toys", slug: 'toys', description: 'Premium collectible toys and luxury gifts for all ages', image: '/images/categories/toys.jpg', productCount: 0 },
+    { id: 'cat-fashion-k', name: "Fashion", slug: 'fashion', description: 'Designer clothing and haute couture collections', image: '/images/categories/fashion.jpg', productCount: 0 },
+    { id: 'cat-home-living-k', name: "Home & Living", slug: 'home-living', description: 'Luxurious home decor and lifestyle accessories', image: '/images/categories/home.jpg', productCount: 0 },
+  ],
+  home: [
+    { id: 'cat-home-living', name: "Home & Living", slug: 'home-living', description: 'Luxurious home decor and lifestyle accessories', image: '/images/categories/home.jpg', productCount: 0 },
+    { id: 'cat-fragrances-h', name: "Fragrance", slug: 'fragrances', description: 'Signature scents from the world\'s finest perfumers', image: '/images/categories/fragrances.jpg', productCount: 0 },
+    { id: 'cat-leather-goods-h', name: "Leather Goods", slug: 'leather-goods', description: 'Premium leather bags, wallets, and accessories', image: '/images/categories/leather.jpg', productCount: 0 },
+    { id: 'cat-fashion-h', name: "Fashion", slug: 'fashion', description: 'Designer clothing and haute couture collections', image: '/images/categories/fashion.jpg', productCount: 0 },
+  ],
+  office: [
+    { id: 'cat-leather-goods', name: "Leather Goods", slug: 'leather-goods', description: 'Premium leather bags, wallets, and accessories', image: '/images/categories/leather.jpg', productCount: 0 },
+    { id: 'cat-watches-o', name: "Watches", slug: 'watches', description: 'Luxury timepieces from world-renowned makers', image: '/images/categories/watches.jpg', productCount: 0 },
+    { id: 'cat-fashion-o', name: "Fashion", slug: 'fashion', description: 'Designer clothing and haute couture collections', image: '/images/categories/fashion.jpg', productCount: 0 },
+    { id: 'cat-home-living-o', name: "Home & Living", slug: 'home-living', description: 'Luxurious home decor and lifestyle accessories', image: '/images/categories/home.jpg', productCount: 0 },
+  ],
 };
 
 /* ── The main component ── */
@@ -84,7 +116,7 @@ export function CategoryGrid() {
   const [subCanScrollLeft, setSubCanScrollLeft] = useState(false);
   const [subCanScrollRight, setSubCanScrollRight] = useState(true);
 
-  // Fetch all categories (normal)
+  // Fetch all categories from API (for enriching product counts)
   const { data: allData, isLoading } = useQuery<{ categories: Category[] }>({
     queryKey: ['categories'],
     queryFn: () => fetch('/api/categories').then((r) => r.json()),
@@ -100,12 +132,47 @@ export function CategoryGrid() {
   const allCategories = allData?.categories ?? [];
   const newArrivalCategories = newData?.categories ?? [];
 
+  // Build a slug → productCount map from API data
+  const apiProductCountMap = new Map<string, number>();
+  for (const cat of allCategories) {
+    apiProductCountMap.set(cat.slug, cat.productCount);
+  }
+
   // Determine which categories to show in the sub-category section
+  // Uses HARDCODED data as base, enriches with API product counts
   const getFilteredCategories = (): Category[] => {
     if (!selectedParentCategory) return [];
-    if (selectedParentCategory === 'new-arrivals') return newArrivalCategories;
-    const allowedSlugs = SUB_CATEGORY_MAP[selectedParentCategory] || [];
-    return allCategories.filter((cat) => allowedSlugs.includes(cat.slug));
+
+    // For new-arrivals, use API data (dynamic)
+    if (selectedParentCategory === 'new-arrivals') {
+      if (newArrivalCategories.length > 0) return newArrivalCategories;
+      // Fallback: show all hardcoded categories as "new arrivals" if API fails
+      return Object.values(HARDCODED_SUBCATEGORIES).flat().filter(
+        (cat, index, self) => self.findIndex(c => c.slug === cat.slug) === index
+      );
+    }
+
+    // For other parent categories: use hardcoded data, enrich with API counts
+    const hardcoded = HARDCODED_SUBCATEGORIES[selectedParentCategory] || [];
+    if (hardcoded.length === 0) {
+      // Fallback: try filtering from API data
+      const SUB_CATEGORY_MAP: Record<string, string[]> = {
+        couple: ['couple-gifts', 'romantic-gifts', 'fragrances', 'jewelry', 'watches'],
+        men: ['mens-shirts', 'fragrances', 'leather-goods', 'watches', 'jewelry'],
+        women: ['sarees', 'fragrances', 'jewelry', 'watches', 'fashion'],
+        kids: ['toys', 'fashion', 'home-living'],
+        home: ['home-living', 'fragrances', 'leather-goods', 'fashion'],
+        office: ['leather-goods', 'watches', 'fashion', 'home-living'],
+      };
+      const allowedSlugs = SUB_CATEGORY_MAP[selectedParentCategory] || [];
+      return allCategories.filter((cat) => allowedSlugs.includes(cat.slug));
+    }
+
+    // Enrich hardcoded data with real product counts from API
+    return hardcoded.map((cat) => ({
+      ...cat,
+      productCount: apiProductCountMap.get(cat.slug) ?? cat.productCount,
+    }));
   };
 
   const filteredCategories = getFilteredCategories();
@@ -162,7 +229,6 @@ export function CategoryGrid() {
   const doSubScroll = (dir: 'left' | 'right') => {
     const el = subScrollRef.current;
     if (!el) return;
-    // Scroll by 1 item width (4 items visible, so each item = 25% of width)
     const itemWidth = el.clientWidth / 4;
     el.scrollBy({ left: dir === 'left' ? -itemWidth : itemWidth, behavior: 'smooth' });
   };
@@ -447,7 +513,9 @@ export function CategoryGrid() {
                       }}>
                         {selectedParentCategory === 'new-arrivals' && cat.newProductCount
                           ? `${cat.newProductCount} new`
-                          : `${cat.productCount} ${t('categories.items')}`}
+                          : cat.productCount > 0
+                          ? `${cat.productCount} ${t('categories.items')}`
+                          : t('categories.items')}
                       </span>
                     </motion.button>
                   );
