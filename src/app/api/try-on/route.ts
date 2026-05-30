@@ -84,7 +84,7 @@ async function generateImage(prompt: string, size: string): Promise<string | nul
   const headers = getZAIHeaders(config)
 
   const body: Record<string, any> = isPublicAPI(config)
-    ? { model: 'cogview-4', prompt, size: mapToCogViewSize(size) }
+    ? { model: 'glm-image', prompt, size: mapToCogViewSize(size), quality: 'standard' }
     : { prompt, size }
 
   console.log(`[zai-api] POST ${url} model=${body.model || 'default'} size=${body.size}`)
@@ -127,7 +127,7 @@ async function generateImageAsync(prompt: string, size: string): Promise<string 
 
   const url = `${config.baseUrl}/async/images/generations`
   const headers = getZAIHeaders(config)
-  const body = { model: 'cogview-4', prompt, size: mapToCogViewSize(size) }
+  const body = { model: 'glm-image', prompt, size: mapToCogViewSize(size), quality: 'standard' }
 
   console.log(`[zai-api] ASYNC POST ${url} model=${body.model} size=${body.size}`)
 
@@ -635,9 +635,10 @@ export async function GET(request: NextRequest) {
             method: 'POST',
             headers: getZAIHeaders(config),
             body: JSON.stringify({
-              model: 'cogview-4',
+              model: 'glm-image',
               prompt: 'test',
               size: '1280x1280',
+              quality: 'standard',
             }),
             signal: AbortSignal.timeout(15000),
           })
