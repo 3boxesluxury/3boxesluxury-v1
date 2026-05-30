@@ -132,7 +132,7 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // CREATE JWT TOKEN
+    // CREATE JWT TOKEN - key fix
     const token = jwt.sign(
       {
         userId: user.id,

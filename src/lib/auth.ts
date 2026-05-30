@@ -39,10 +39,11 @@ export async function authenticate(
 
   const token = authHeader.replace('Bearer ', '')
 
-  // Strategy 1: JWT verification
+  // Strategy 1: JWT verification (PRIMARY - survives cold starts)
   try {
     const decoded = jwt.verify(token, JWT_SECRET) as JWTPayload
 
+    // Try DB lookup for full user data
     try {
       const dbUser = await db.user.findUnique({
         where: { id: decoded.userId },
@@ -79,6 +80,7 @@ export async function authenticate(
         error: NextResponse.json({ error: 'Token expired' }, { status: 401 }),
       }
     }
+    // JWT verification failed, try session fallback
   }
 
   // Strategy 2: Session fallback (for old UUID tokens)
