@@ -45,6 +45,9 @@ interface ProductDetail {
   sourceUrl?: string;
   affiliateUrl?: string;
   platformLogo?: string;
+  shopifyId?: string | null;
+  shopifyVariantId?: string | null;
+  source?: 'local' | 'shopify' | 'affiliate';
   createdAt?: string | null;
 }
 
@@ -229,11 +232,11 @@ function TryOnDialog({
     if (!selfieData) return;
     setStep('generating');
     setError(null);
-    setProgressMessage('Starting AI style preview...');
+    setProgressMessage('Analyzing your photo and product...');
     onBackgroundJob('generating');
 
     try {
-      // Step 1: POST to create a job
+      // Single POST request — server returns result directly (no polling)
       const postRes = await fetch('/api/try-on', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -244,55 +247,24 @@ function TryOnDialog({
         }),
       });
 
-      const postData = await postRes.json();
+      const data = await postRes.json();
+
       if (!postRes.ok) {
-        throw new Error(postData.error || `Error: ${postRes.status}`);
+        throw new Error(data.error || data.detail || `Error: ${postRes.status}`);
       }
 
-      const jobId = postData.jobId;
-      if (!jobId) {
-        throw new Error('No job ID returned from server');
+      if (data.status === 'completed' && data.imageUrl) {
+        setResultImage(data.imageUrl);
+        setWatermarkedResult(data.imageUrl);
+        setStrategy(data.strategy || 'ai-generation');
+        if (data.faceScore) setFaceScore(data.faceScore);
+        if (data.productScore) setProductScore(data.productScore);
+        if (data.suggestions?.length) setSuggestions(data.suggestions);
+        setStep('result');
+        onBackgroundJob('result');
+      } else {
+        throw new Error('No image was generated. Please try again.');
       }
-
-      // Step 2: Poll for job completion
-      const maxPolls = 120; // 120 * 2s = 4 minutes max
-      let pollCount = 0;
-
-      const pollJob = async (): Promise<void> => {
-        pollCount++;
-        if (pollCount > maxPolls) {
-          throw new Error('Generation timed out. Please try again.');
-        }
-
-        const pollRes = await fetch(`/api/try-on?jobId=${jobId}`);
-        const pollData = await pollRes.json();
-
-        if (pollData.progress) {
-          setProgressMessage(pollData.progress);
-        }
-
-        if (pollData.status === 'completed' && pollData.imageUrl) {
-          setResultImage(pollData.imageUrl);
-          setWatermarkedResult(pollData.imageUrl);
-          setStrategy(pollData.strategy || 'ai-generation');
-          if (pollData.faceScore) setFaceScore(pollData.faceScore);
-          if (pollData.productScore) setProductScore(pollData.productScore);
-          if (pollData.suggestions?.length) setSuggestions(pollData.suggestions);
-          setStep('result');
-          onBackgroundJob('result');
-          return;
-        }
-
-        if (pollData.status === 'failed') {
-          throw new Error(pollData.error || 'Generation failed');
-        }
-
-        // Still processing, poll again after 2 seconds
-        await new Promise(r => setTimeout(r, 2000));
-        return pollJob();
-      };
-
-      await pollJob();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong');
       setStep('preview');
@@ -507,6 +479,9 @@ function TryOnDialog({
                 <p className="mt-1 text-center text-xs text-amber-200/40">
                   Creating your AI style preview with {productName}
                 </p>
+                <p className="mt-2 text-center text-[10px] text-amber-200/30">
+                  This may take 20-60 seconds...
+                </p>
               </div>
 
               {/* Product Gallery - shown while waiting */}
@@ -684,7 +659,7 @@ function TryOnDialog({
 
 // ── Product Detail Component ───────────────────────────────────
 export function ProductDetail() {
-  const { selectedProductId, setView, addItem, setCategory, authUser, authToken } = useStore();
+  const { selectedProductId, selectedProductPreview, previousCategory, setView, addItem, setCategory, authUser, authToken } = useStore();
   const { trackClick } = useAffiliateClick();
   const { format } = useCurrency();
   const { t } = useTranslation();
@@ -700,34 +675,45 @@ export function ProductDetail() {
   const [reviewForm, setReviewForm] = useState({ rating: 5, title: '', comment: '', name: '' });
   const [reviewSubmitting, setReviewSubmitting] = useState(false);
 
-  const { data, isLoading } = useQuery<{ product: ProductDetail }>({
+  // Use preview data from product card for instant rendering, then enrich with API data
+  const previewProduct = selectedProductPreview as ProductDetail | null;
+
+  const { data, isLoading, error } = useQuery<{ product: ProductDetail }>({
     queryKey: ['product', selectedProductId],
-    queryFn: () => fetch(`/api/products/${selectedProductId}`).then((r) => r.json()),
+    queryFn: async () => {
+      const res = await fetch(`/api/products/${encodeURIComponent(selectedProductId!)}`)
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({ error: 'Failed to fetch product' }))
+        throw new Error(errData.error || `Error ${res.status}`)
+      }
+      return res.json()
+    },
     enabled: !!selectedProductId,
+    placeholderData: previewProduct ? { product: previewProduct } : undefined,
+    staleTime: 5 * 60 * 1000,  // 5 minutes — don't re-fetch if already fresh
+    retry: 1,
   });
 
-  const product = data?.product;
+  // Use API data if available, otherwise fall back to preview data
+  const product = data?.product || previewProduct;
 
-  // Wishlist check
-  const { data: wishlistData } = useQuery({
+  // Wishlist check — optimized: only check this specific product instead of fetching all wishlist items
+  const { data: wishlistCheckData } = useQuery({
     queryKey: ['wishlist-check', selectedProductId],
     queryFn: async () => {
-      if (!authToken) return { wishlist: [] };
-      const res = await fetch('/api/wishlist', {
+      if (!authToken) return { isWishlisted: false };
+      const res = await fetch(`/api/wishlist?productId=${selectedProductId}`, {
         headers: { Authorization: `Bearer ${authToken}` },
       });
-      if (!res.ok) return { wishlist: [] };
+      if (!res.ok) return { isWishlisted: false };
       return res.json();
     },
     enabled: !!authToken && !!selectedProductId,
   });
 
   useEffect(() => {
-    if (wishlistData?.wishlist) {
-      const found = wishlistData.wishlist.some((w: any) => w.productId === selectedProductId);
-      setIsWishlisted(found);
-    }
-  }, [wishlistData, selectedProductId]);
+    setIsWishlisted(wishlistCheckData?.isWishlisted ?? false);
+  }, [wishlistCheckData]);
 
   // Reviews query
   const { data: reviewsData, isLoading: reviewsLoading } = useQuery({
@@ -790,15 +776,16 @@ export function ProductDetail() {
     }
   };
 
-  // For external products with HTTP image URLs, use the image proxy
+  // All product images (including Shopify CDN) are publicly accessible - no proxy needed
   const getProxiedImageUrl = (url: string): string => {
     if (url.startsWith('http://') || url.startsWith('https://')) {
-      return `/api/image-proxy?url=${encodeURIComponent(url)}&platform=${product?.platform || ''}`;
+      return url;
     }
     if (url.startsWith('//')) {
-      return `/api/image-proxy?url=${encodeURIComponent('https:' + url)}&platform=${product?.platform || ''}`;
+      return 'https:' + url;
     }
-    return url;
+    // For relative paths (local images), return as-is
+    return url.startsWith('/') ? url : `/${url}`;
   };
 
   const handleAddToCart = () => {
@@ -810,6 +797,8 @@ export function ProductDetail() {
         name: product.name,
         price: product.price,
         image: getProxiedImageUrl(product.images[0] || '/images/placeholder.jpg'),
+        shopifyVariantId: product.shopifyVariantId || undefined,
+        source: product.source || 'local',
       });
     }
     setTimeout(() => setIsAdding(false), 800);
@@ -823,7 +812,8 @@ export function ProductDetail() {
     setBackgroundJobStep(null);
   }, []);
 
-  if (isLoading) {
+  // Only show loading skeleton if we have NO preview data at all
+  if (isLoading && !previewProduct) {
     return (
       <div className="py-8">
         <div className="grid gap-8 md:grid-cols-2">
@@ -843,8 +833,17 @@ export function ProductDetail() {
   if (!product) {
     return (
       <div className="flex flex-col items-center justify-center py-16">
-        <p className="text-amber-200/60">Product not found</p>
-        <Button onClick={() => setView('home')} className="mt-4 bg-amber-600 text-stone-950 hover:bg-amber-500">
+        <p className="text-amber-200/60">
+          {error ? error.message : 'Product not found'}
+        </p>
+        <Button onClick={() => {
+          const categoryToRestore = previousCategory;
+          if (categoryToRestore) {
+            setCategory(categoryToRestore);
+          } else {
+            setView('home');
+          }
+        }} className="mt-4 bg-amber-600 text-stone-950 hover:bg-amber-500">
           Back to Products
         </Button>
       </div>
@@ -862,10 +861,17 @@ export function ProductDetail() {
       transition={{ duration: 0.3 }}
       className="py-8"
     >
-      {/* Back button */}
+      {/* Back button — returns to the category you were viewing */}
       <Button
         variant="ghost"
-        onClick={() => setView('home')}
+        onClick={() => {
+          const categoryToRestore = previousCategory || product?.categorySlug;
+          if (categoryToRestore) {
+            setCategory(categoryToRestore); // This also sets view: 'home'
+          } else {
+            setView('home');
+          }
+        }}
         className="mb-6 text-amber-200/60 hover:bg-amber-900/20 hover:text-amber-400"
       >
         <ArrowLeft className="mr-2 h-4 w-4" />
@@ -1345,8 +1351,9 @@ export function ProductDetail() {
           categorySlug={product.categorySlug}
           productImages={product.images.map(img => getProxiedImageUrl(img))}
           onBackgroundJob={handleBackgroundJob}
-          onResetBackground={handleResetBackground}
-/>
+          onResetBackground={handleResetBackground
+}
+        />
       )}
 
       {/* Floating Pill — shown when dialog is closed but a background job is running */}
