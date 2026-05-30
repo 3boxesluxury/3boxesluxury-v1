@@ -33,7 +33,7 @@ function setCache<T>(key: string, data: T): void {
   if (shopifyCache.size > 50) {
     const oldest = [...shopifyCache.entries()].sort((a, b) => a[1].timestamp - b[1].timestamp)
     for (let i = 0; i < 10 && i < oldest.length; i++) {
-      shopifyCache.delete(oldest[i][0)
+      shopifyCache.delete(oldest[i][0])
     }
   }
 }
