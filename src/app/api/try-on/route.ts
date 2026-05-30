@@ -1,11 +1,17 @@
 /**
- * Try-On API Route v2 — FIXED for Vercel Serverless
+ * Try-On API Route v3 — FIXED for Vercel Serverless
  *
- * KEY CHANGES from previous version:
+ * KEY FIX v3: Calls ensureSeeded() before DB queries!
+ * On Vercel, each serverless instance starts with empty /tmp DB.
+ * Without ensureSeeded(), db.product.findUnique() fails with
+ * "Database error — product lookup failed"
+ *
+ * Also includes v2 fixes:
  * 1. NO z-ai-web-dev-sdk dependency — uses raw fetch instead
  * 2. NO readFileSync — fetches product images via HTTP
  * 3. NO polling — returns result synchronously in POST response
  * 4. NO file system dependencies — works on Vercel serverless
+ * 5. Falls back to product API if DB still fails after seeding
  *
  * Required environment variables on Vercel:
  *   ZAI_BASE_URL  — https://internal-api.z.ai/v1
@@ -72,12 +78,10 @@ async function generateImage(prompt: string, size: ImageSize): Promise<string | 
 
   const result = await response.json()
 
-  // The API returns either base64 data or a URL
   if (result.data?.[0]?.base64) {
     return result.data[0].base64
   }
 
-  // If it returns a URL, download and convert to base64
   if (result.data?.[0]?.url) {
     const imageUrl = result.data[0].url
     console.log('[zai-api] Downloading generated image from URL:', imageUrl.substring(0, 100))
@@ -130,7 +134,7 @@ async function editImage(
       const buffer = Buffer.from(await imgResponse.arrayBuffer())
       return buffer.toString('base64')
     }
-    console.error('[zai-api] Failed to download edited image from URL')
+    console.error('[zai-api] Failed to download image from URL')
     return null
   }
 
@@ -193,6 +197,81 @@ async function getProductImageBase64(imagePath: string): Promise<string | null> 
   }
 }
 
+// ── Product lookup with DB + fallback ─────────────────────────────
+
+interface ProductData {
+  id: string
+  name: string
+  images: string[]
+  categorySlug: string
+  category: { slug: string; name: string }
+}
+
+async function getProduct(productId: string): Promise<ProductData | null> {
+  // ── Strategy 1: Try database with ensureSeeded() ──
+  try {
+    const { db } = await import('@/lib/db')
+    const { ensureSeeded } = await import('@/lib/auto-seed')
+
+    // CRITICAL: Ensure DB is seeded before querying!
+    // On Vercel, each serverless instance starts with empty /tmp DB.
+    await ensureSeeded()
+
+    const product = await db.product.findUnique({
+      where: { id: productId },
+      include: { category: true },
+    })
+
+    if (product) {
+      console.log('[try-on] Product found in DB:', product.name)
+      return product as unknown as ProductData
+    }
+  } catch (dbErr) {
+    console.error('[try-on] DB lookup failed:', (dbErr as Error).message?.substring(0, 200))
+  }
+
+  // ── Strategy 2: Fallback — fetch from product API endpoint ──
+  try {
+    const baseUrl = process.env.NEXT_PUBLIC_BASE_URL
+      || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '')
+      || 'http://localhost:3000'
+    const apiUrl = `${baseUrl}/api/products/${encodeURIComponent(productId)}`
+    console.log('[try-on] Falling back to product API:', apiUrl)
+
+    const response = await fetch(apiUrl, {
+      signal: AbortSignal.timeout(10000),
+      headers: { 'Accept': 'application/json' },
+    })
+
+    if (!response.ok) {
+      console.error('[try-on] Product API returned:', response.status)
+      return null
+    }
+
+    const data = await response.json()
+    const product = data.product
+
+    if (product) {
+      console.log('[try-on] Product found via API:', product.name)
+      // Transform to match DB shape
+      return {
+        id: product.id,
+        name: product.name,
+        images: product.images || [],
+        categorySlug: product.categorySlug || 'jewelry',
+        category: {
+          slug: product.categorySlug || 'jewelry',
+          name: product.category || 'Jewelry',
+        },
+      }
+    }
+  } catch (apiErr) {
+    console.error('[try-on] Product API fallback failed:', (apiErr as Error).message?.substring(0, 200))
+  }
+
+  return null
+}
+
 // ── Product placement helpers ──────────────────────────────────────
 
 function getProductPlacement(categorySlug: string, productName: string): string {
@@ -245,20 +324,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Invalid selfie format — must be a data:image/ URI' }, { status: 400 })
     }
 
-    // Import db dynamically
-    const { db } = await import('@/lib/db')
-
-    // Look up product
-    let product: any
-    try {
-      product = await db.product.findUnique({
-        where: { id: productId },
-        include: { category: true },
-      })
-    } catch (dbErr) {
-      console.error('[try-on] Database error:', (dbErr as Error).message?.substring(0, 200))
-      return NextResponse.json({ error: 'Database error — product lookup failed. Try refreshing the page.' }, { status: 500 })
-    }
+    // Look up product (with ensureSeeded + API fallback)
+    const product = await getProduct(productId)
 
     if (!product) {
       return NextResponse.json({ error: 'Product not found — it may have been removed' }, { status: 404 })
@@ -267,7 +334,9 @@ export async function POST(request: NextRequest) {
     // Get product image
     let productImages: string[] = []
     try {
-      productImages = JSON.parse(product.images || '[]')
+      productImages = typeof product.images === 'string'
+        ? JSON.parse(product.images || '[]')
+        : (product.images || [])
     } catch {
       productImages = []
     }
@@ -284,7 +353,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Could not load product image — the image URL may be broken' }, { status: 400 })
     }
 
-    const categorySlug = product.category?.slug || 'jewelry'
+    const categorySlug = product.category?.slug || product.categorySlug || 'jewelry'
     const productName = product.name
     const placement = getProductPlacement(categorySlug, productName)
     const size = getImageSize(categorySlug)
@@ -308,6 +377,10 @@ export async function POST(request: NextRequest) {
         // Get suggestions
         let suggestions: any[] = []
         try {
+          const { db } = await import('@/lib/db')
+          const { ensureSeeded } = await import('@/lib/auto-seed')
+          await ensureSeeded()
+
           const pairingMap: Record<string, string[]> = {
             'sarees': ['jewelry'],
             'jewelry': ['sarees', 'fashion'],
@@ -337,7 +410,7 @@ export async function POST(request: NextRequest) {
             categorySlug: s.category?.slug || '',
           }))
         } catch {
-          // Non-critical
+          // Non-critical — suggestions are optional
         }
 
         return NextResponse.json({
@@ -479,6 +552,26 @@ export async function GET(request: NextRequest) {
     }
   }
 
+  if (check === 'db') {
+    // Test database connectivity
+    try {
+      const { db } = await import('@/lib/db')
+      const { ensureSeeded } = await import('@/lib/auto-seed')
+      await ensureSeeded()
+      const count = await db.product.count()
+      return NextResponse.json({
+        status: 'ok',
+        productCount: count,
+        message: `Database is working. ${count} products available.`,
+      })
+    } catch (err) {
+      return NextResponse.json({
+        status: 'error',
+        message: (err as Error).message?.substring(0, 300),
+      }, { status: 500 })
+    }
+  }
+
   // For backward compatibility
   const jobId = searchParams.get('jobId')
   if (jobId) {
@@ -499,6 +592,7 @@ export async function GET(request: NextRequest) {
       ZAI_USER_ID: process.env.ZAI_USER_ID ? 'SET' : 'MISSING',
       ZAI_TOKEN: process.env.ZAI_TOKEN ? 'SET' : 'MISSING',
       NEXT_PUBLIC_BASE_URL: process.env.NEXT_PUBLIC_BASE_URL || '(not set)',
+      VERCEL_URL: process.env.VERCEL_URL || '(not set)',
     },
   })
 }
