@@ -644,3 +644,6 @@ async function backgroundProcess(
 
 // Increase body size limit for large selfie uploads
 export const maxBodyLength = 10 * 1024 * 1024
+
+// Vercel serverless function timeout — try-on needs time for AI generation
+export const maxDuration = 60
