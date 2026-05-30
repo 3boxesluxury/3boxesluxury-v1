@@ -1,44 +1,54 @@
 /**
- * Try-On API Route v3 — FIXED for Vercel Serverless
+ * Try-On API Route v4 — FIXED for Vercel Serverless + Z.AI Public API
  *
- * KEY FIX v3: Calls ensureSeeded() before DB queries!
- * On Vercel, each serverless instance starts with empty /tmp DB.
- * Without ensureSeeded(), db.product.findUnique() fails with
- * "Database error — product lookup failed"
+ * KEY FIX v4: Uses Z.AI PUBLIC API endpoint (https://api.z.ai/api/paas/v4)
+ * which is accessible from Vercel's servers!
  *
- * Also includes v2 fixes:
- * 1. NO z-ai-web-dev-sdk dependency — uses raw fetch instead
- * 2. NO readFileSync — fetches product images via HTTP
- * 3. NO polling — returns result synchronously in POST response
- * 4. NO file system dependencies — works on Vercel serverless
- * 5. Falls back to product API if DB still fails after seeding
+ * The internal endpoint (internal-api.z.ai) uses PRIVATE IPs (172.25.x.x)
+ * and is ONLY reachable from Z.AI's internal network — NOT from Vercel.
  *
- * Required environment variables on Vercel:
- *   ZAI_BASE_URL  — https://internal-api.z.ai/v1
- *   ZAI_API_KEY   — Z.ai
- *   ZAI_CHAT_ID   — chat-eeb868c8-9041-42f2-be71-d4045dd60c00
- *   ZAI_USER_ID   — a891c820-2df0-4010-856e-aed1c7d75526
- *   ZAI_TOKEN     — eyJhbGciOiJIUzI1NiIs...
- *   NEXT_PUBLIC_BASE_URL — https://your-app.vercel.app
+ * v3 fixes retained:
+ * - Calls ensureSeeded() before DB queries
+ * - Falls back to product API if DB fails
+ * - NO z-ai-web-dev-sdk dependency — uses raw fetch
+ * - NO readFileSync — fetches images via HTTP
+ * - NO polling — returns result synchronously
+ *
+ * Required Vercel environment variables:
+ *   ZAI_BASE_URL  — https://api.z.ai/api/paas/v4
+ *   ZAI_API_KEY   — Your Z.AI API key (get one at https://z.ai → API Keys)
+ *   NEXT_PUBLIC_BASE_URL — https://3boxesluxury-v1.vercel.app
+ *
+ * Optional (not needed for public API):
+ *   ZAI_CHAT_ID, ZAI_USER_ID, ZAI_TOKEN — only for internal API
  */
 
 import { NextRequest, NextResponse } from 'next/server'
+import { db, ensureDBReady } from '@/lib/db'
 
-type ImageSize = '1024x1024' | '768x1344' | '864x1152' | '1344x768' | '1152x864' | '1440x720' | '720x1440'
+// ── Image sizes supported by Z.AI public API ──────────────────────
 
-// ── Z.AI API Helper (raw fetch — no SDK needed) ─────────────────
+type GLMImageSize = '1024x1024' | '768x1344' | '864x1152' | '1344x768' | '1152x864' | '1440x720' | '720x1440'
+type CogViewSize = '1280x1280' | '1568x1056' | '1056x1568' | '1472x1088' | '1088x1472' | '1728x960' | '960x1728'
+
+// ── Z.AI Public API Helper ────────────────────────────────────────
 
 function getZAIConfig() {
-  const baseUrl = process.env.ZAI_BASE_URL
-  const apiKey = process.env.ZAI_API_KEY
+  const baseUrl = (process.env.ZAI_BASE_URL || '').trim()
+  const apiKey = (process.env.ZAI_API_KEY || '').trim()
+
   if (!baseUrl || !apiKey) {
     throw new Error(
-      'AI service not configured. Set ZAI_BASE_URL and ZAI_API_KEY environment variables on Vercel.'
+      'AI service not configured. Set ZAI_BASE_URL and ZAI_API_KEY on Vercel. ' +
+      'Get an API key at https://z.ai → API Keys page. ' +
+      'Set ZAI_BASE_URL=https://api.z.ai/api/paas/v4'
     )
   }
+
   return {
     baseUrl,
     apiKey,
+    // Internal API headers (kept for backward compat if using internal-api.z.ai)
     chatId: process.env.ZAI_CHAT_ID || '',
     userId: process.env.ZAI_USER_ID || '',
     token: process.env.ZAI_TOKEN || '',
@@ -49,61 +59,159 @@ function getZAIHeaders(config: ReturnType<typeof getZAIConfig>) {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'Authorization': `Bearer ${config.apiKey}`,
-    'X-Z-AI-From': 'Z',
   }
-  if (config.chatId) headers['X-Chat-Id'] = config.chatId
-  if (config.userId) headers['X-User-Id'] = config.userId
-  if (config.token) headers['X-Token'] = config.token
+
+  // If using internal API, add the extra headers
+  if (config.baseUrl.includes('internal-api.z.ai')) {
+    headers['X-Z-AI-From'] = 'Z'
+    if (config.chatId) headers['X-Chat-Id'] = config.chatId
+    if (config.userId) headers['X-User-Id'] = config.userId
+    if (config.token) headers['X-Token'] = config.token
+  }
+
   return headers
 }
 
-/** Generate image from text prompt */
-async function generateImage(prompt: string, size: ImageSize): Promise<string | null> {
+/** Check if we're using the Z.AI public API */
+function isPublicAPI(config: ReturnType<typeof getZAIConfig>): boolean {
+  return config.baseUrl.includes('api.z.ai/api/paas')
+}
+
+/** Generate image from text prompt using Z.AI public API */
+async function generateImage(prompt: string, size: string): Promise<string | null> {
   const config = getZAIConfig()
   const url = `${config.baseUrl}/images/generations`
   const headers = getZAIHeaders(config)
 
+  const body: Record<string, any> = isPublicAPI(config)
+    ? { model: 'cogview-4', prompt, size: mapToCogViewSize(size) }
+    : { prompt, size }
+
+  console.log(`[zai-api] POST ${url} model=${body.model || 'default'} size=${body.size}`)
+
   const response = await fetch(url, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ prompt, size }),
-    signal: AbortSignal.timeout(60000),
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(90000),
   })
 
   if (!response.ok) {
     const errorBody = await response.text()
-    console.error('[zai-api] Image generation failed:', response.status, errorBody.substring(0, 200))
-    throw new Error(`AI API error ${response.status}: ${errorBody.substring(0, 100)}`)
+    console.error('[zai-api] Image generation failed:', response.status, errorBody.substring(0, 300))
+
+    // Check for auth errors and give helpful message
+    if (response.status === 401 || errorBody.includes('auth') || errorBody.includes('Authentication')) {
+      throw new Error(
+        'Z.AI API authentication failed. Your API key may be invalid or expired. ' +
+        'Get a new key at https://z.ai → API Keys. ' +
+        `Detail: ${errorBody.substring(0, 100)}`
+      )
+    }
+
+    throw new Error(`AI API error ${response.status}: ${errorBody.substring(0, 150)}`)
   }
 
   const result = await response.json()
+  return extractImageFromResponse(result)
+}
 
-  if (result.data?.[0]?.base64) {
-    return result.data[0].base64
+/** Generate image asynchronously (better for Vercel timeout) */
+async function generateImageAsync(prompt: string, size: string): Promise<string | null> {
+  const config = getZAIConfig()
+
+  // Only public API supports async endpoint
+  if (!isPublicAPI(config)) {
+    return generateImage(prompt, size)
   }
 
-  if (result.data?.[0]?.url) {
-    const imageUrl = result.data[0].url
-    console.log('[zai-api] Downloading generated image from URL:', imageUrl.substring(0, 100))
-    const imgResponse = await fetch(imageUrl, { signal: AbortSignal.timeout(30000) })
-    if (imgResponse.ok) {
-      const buffer = Buffer.from(await imgResponse.arrayBuffer())
-      return buffer.toString('base64')
+  const url = `${config.baseUrl}/async/images/generations`
+  const headers = getZAIHeaders(config)
+  const body = { model: 'cogview-4', prompt, size: mapToCogViewSize(size) }
+
+  console.log(`[zai-api] ASYNC POST ${url} model=${body.model} size=${body.size}`)
+
+  // Step 1: Submit the async request
+  const submitResponse = await fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(30000),
+  })
+
+  if (!submitResponse.ok) {
+    const errorBody = await submitResponse.text()
+    console.error('[zai-api] Async submit failed:', submitResponse.status, errorBody.substring(0, 200))
+
+    // Fallback to sync
+    console.log('[zai-api] Falling back to synchronous generation')
+    return generateImage(prompt, size)
+  }
+
+  const submitResult = await submitResponse.json()
+  const taskId = submitResult.id || submitResult.task_id || submitResult.request_id
+
+  if (!taskId) {
+    console.error('[zai-api] No task ID in async response:', JSON.stringify(submitResult).substring(0, 200))
+    return generateImage(prompt, size)
+  }
+
+  console.log(`[zai-api] Async task submitted: ${taskId}`)
+
+  // Step 2: Poll for result
+  const resultUrl = `${config.baseUrl}/async-result/${taskId}`
+  const maxPolls = 30
+  const pollInterval = 3000
+
+  for (let i = 0; i < maxPolls; i++) {
+    await new Promise(resolve => setTimeout(resolve, pollInterval))
+
+    const pollResponse = await fetch(resultUrl, {
+      headers,
+      signal: AbortSignal.timeout(15000),
+    })
+
+    if (!pollResponse.ok) {
+      console.error(`[zai-api] Poll ${i + 1} failed:`, pollResponse.status)
+      continue
     }
-    console.error('[zai-api] Failed to download image from URL')
-    return null
+
+    const pollResult = await pollResponse.json()
+
+    // Check if task is complete
+    if (pollResult.data?.[0]?.url || pollResult.data?.[0]?.base64) {
+      console.log(`[zai-api] Async task completed after ${i + 1} polls`)
+      return extractImageFromResponse(pollResult)
+    }
+
+    // Check task status
+    const taskStatus = pollResult.task_status || pollResult.status
+    if (taskStatus === 'FAILED' || taskStatus === 'failed') {
+      console.error('[zai-api] Async task failed:', JSON.stringify(pollResult).substring(0, 200))
+      return null
+    }
+
+    console.log(`[zai-api] Poll ${i + 1}/${maxPolls}: status=${taskStatus || 'processing'}`)
   }
 
+  console.error('[zai-api] Async task timed out after', maxPolls * pollInterval / 1000, 's')
   return null
 }
 
-/** Edit image with prompt + reference images */
+/** Edit image with prompt + reference images (internal API only) */
 async function editImage(
   prompt: string,
   images: Array<{ url: string }>,
-  size: ImageSize
+  size: string
 ): Promise<string | null> {
   const config = getZAIConfig()
+
+  // Public API does NOT have an edit endpoint — skip this strategy
+  if (isPublicAPI(config)) {
+    console.log('[zai-api] Image edit not available on public API, skipping')
+    return null
+  }
+
   const url = `${config.baseUrl}/images/generations/edit`
   const headers = getZAIHeaders(config)
 
@@ -121,24 +229,51 @@ async function editImage(
   }
 
   const result = await response.json()
+  return extractImageFromResponse(result)
+}
 
+/** Extract image data from Z.AI API response (handles both URL and base64) */
+async function extractImageFromResponse(result: any): Promise<string | null> {
   if (result.data?.[0]?.base64) {
     return result.data[0].base64
   }
 
   if (result.data?.[0]?.url) {
     const imageUrl = result.data[0].url
-    console.log('[zai-api] Downloading edited image from URL:', imageUrl.substring(0, 100))
-    const imgResponse = await fetch(imageUrl, { signal: AbortSignal.timeout(30000) })
-    if (imgResponse.ok) {
-      const buffer = Buffer.from(await imgResponse.arrayBuffer())
-      return buffer.toString('base64')
+    console.log('[zai-api] Downloading generated image from URL:', imageUrl.substring(0, 120))
+    try {
+      const imgResponse = await fetch(imageUrl, { signal: AbortSignal.timeout(30000) })
+      if (imgResponse.ok) {
+        const buffer = Buffer.from(await imgResponse.arrayBuffer())
+        return buffer.toString('base64')
+      }
+      console.error('[zai-api] Failed to download image:', imgResponse.status)
+    } catch (downloadErr) {
+      console.error('[zai-api] Image download error:', (downloadErr as Error).message?.substring(0, 200))
     }
-    console.error('[zai-api] Failed to download image from URL')
     return null
   }
 
+  console.error('[zai-api] No image data in response:', JSON.stringify(result).substring(0, 200))
   return null
+}
+
+/** Map standard size to CogView-4 supported sizes */
+function mapToCogViewSize(size: string): CogViewSize {
+  const cogViewSizes: CogViewSize[] = ['1280x1280', '1568x1056', '1056x1568', '1472x1088', '1088x1472', '1728x960', '960x1720']
+  if (cogViewSizes.includes(size as CogViewSize)) return size as CogViewSize
+
+  // Map standard sizes to closest CogView sizes
+  const sizeMap: Record<string, CogViewSize> = {
+    '1024x1024': '1280x1280',
+    '768x1344': '1056x1568',
+    '864x1152': '1088x1472',
+    '1344x768': '1728x960',
+    '1152x864': '1472x1088',
+    '1440x720': '1728x960',
+    '720x1440': '960x1720',
+  }
+  return sizeMap[size] || '1280x1280'
 }
 
 // ── Product image helper (HTTP fetch only — works on Vercel) ──────
@@ -208,14 +343,11 @@ interface ProductData {
 }
 
 async function getProduct(productId: string): Promise<ProductData | null> {
-  // ── Strategy 1: Try database with ensureSeeded() ──
+  // Strategy 1: Try database with ensureDBReady()
   try {
-    const { db } = await import('@/lib/db')
-    const { ensureSeeded } = await import('@/lib/auto-seed')
-
     // CRITICAL: Ensure DB is seeded before querying!
     // On Vercel, each serverless instance starts with empty /tmp DB.
-    await ensureSeeded()
+    await ensureDBReady()
 
     const product = await db.product.findUnique({
       where: { id: productId },
@@ -230,7 +362,7 @@ async function getProduct(productId: string): Promise<ProductData | null> {
     console.error('[try-on] DB lookup failed:', (dbErr as Error).message?.substring(0, 200))
   }
 
-  // ── Strategy 2: Fallback — fetch from product API endpoint ──
+  // Strategy 2: Fallback — fetch from product API endpoint
   try {
     const baseUrl = process.env.NEXT_PUBLIC_BASE_URL
       || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '')
@@ -253,7 +385,6 @@ async function getProduct(productId: string): Promise<ProductData | null> {
 
     if (product) {
       console.log('[try-on] Product found via API:', product.name)
-      // Transform to match DB shape
       return {
         id: product.id,
         name: product.name,
@@ -291,10 +422,10 @@ function getProductPlacement(categorySlug: string, productName: string): string 
   return 'wearing the product'
 }
 
-function getImageSize(categorySlug: string): ImageSize {
-  if (['sarees', 'fashion', 'mens-shirts'].includes(categorySlug)) return '768x1344'
-  if (categorySlug === 'home-living') return '1344x768'
-  return '864x1152'
+function getImageSize(categorySlug: string): string {
+  if (['sarees', 'fashion', 'mens-shirts'].includes(categorySlug)) return '1056x1568'
+  if (categorySlug === 'home-living') return '1728x960'
+  return '1088x1472'
 }
 
 // ── POST /api/try-on — SYNCHRONOUS (returns result directly) ──────
@@ -343,132 +474,80 @@ export async function POST(request: NextRequest) {
 
     const productImageToUse = productImageUrl || (productImages.length > 0 ? productImages[0] : null)
 
-    if (!productImageToUse) {
-      return NextResponse.json({ error: 'No product image available for this item' }, { status: 400 })
-    }
-
-    const productImageBase64 = await getProductImageBase64(productImageToUse)
-
-    if (!productImageBase64) {
-      return NextResponse.json({ error: 'Could not load product image — the image URL may be broken' }, { status: 400 })
-    }
-
     const categorySlug = product.category?.slug || product.categorySlug || 'jewelry'
     const productName = product.name
     const placement = getProductPlacement(categorySlug, productName)
     const size = getImageSize(categorySlug)
+    const config = getZAIConfig()
 
-    // ── Strategy 1: edit-both (best quality — uses both selfie + product images) ──
-    console.log(`[try-on] Strategy 1: edit-both, size: ${size}`)
-    try {
-      const prompt = `Professional fashion photograph. The FIRST image is the person, the SECOND image is the ${productName}. Combine them: show this person ${placement}. Keep the exact same face, hair, skin tone from the first image. Apply the exact product from the second image. Studio lighting, photorealistic, 8K quality.`
+    // ── Strategy 1: edit-both (internal API only — uses both selfie + product images) ──
+    if (!isPublicAPI(config) && productImageToUse) {
+      console.log(`[try-on] Strategy 1: edit-both (internal API), size: ${size}`)
+      try {
+        const productImageBase64 = await getProductImageBase64(productImageToUse)
+        if (productImageBase64) {
+          const prompt = `Professional fashion photograph. The FIRST image is the person, the SECOND image is the ${productName}. Combine them: show this person ${placement}. Keep the exact same face, hair, skin tone from the first image. Apply the exact product from the second image. Studio lighting, photorealistic, 8K quality.`
 
-      const b64 = await editImage(
-        prompt,
-        [{ url: selfieData }, { url: productImageBase64 }],
-        size
-      )
+          const b64 = await editImage(
+            prompt,
+            [{ url: selfieData }, { url: productImageBase64 }],
+            size
+          )
 
-      if (b64) {
-        const imageUrl = `data:image/png;base64,${b64}`
-        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1)
-        console.log(`[try-on] edit-both SUCCESS in ${elapsed}s, ${(b64.length / 1024).toFixed(0)} KB`)
-
-        // Get suggestions
-        let suggestions: any[] = []
-        try {
-          const { db } = await import('@/lib/db')
-          const { ensureSeeded } = await import('@/lib/auto-seed')
-          await ensureSeeded()
-
-          const pairingMap: Record<string, string[]> = {
-            'sarees': ['jewelry'],
-            'jewelry': ['sarees', 'fashion'],
-            'watches': ['mens-shirts', 'leather-goods'],
-            'mens-shirts': ['watches', 'leather-goods'],
-            'fashion': ['jewelry', 'watches'],
-            'fragrances': ['jewelry', 'fashion'],
-            'leather-goods': ['watches', 'fashion'],
+          if (b64) {
+            const imageUrl = `data:image/png;base64,${b64}`
+            const elapsed = ((Date.now() - startTime) / 1000).toFixed(1)
+            console.log(`[try-on] edit-both SUCCESS in ${elapsed}s`)
+            return NextResponse.json({
+              status: 'completed',
+              imageUrl,
+              productName,
+              categorySlug,
+              strategy: 'edit-both',
+              faceScore: 8,
+              productScore: 8,
+              suggestions: [],
+              elapsed: `${elapsed}s`,
+            })
           }
-          const pairingCats = pairingMap[categorySlug] || ['jewelry']
-          const suggestionProducts = await db.product.findMany({
-            where: {
-              category: { slug: { in: pairingCats } },
-              id: { not: productId },
-              stock: { gt: 0 },
-            },
-            include: { category: true },
-            take: 4,
-            orderBy: { rating: 'desc' },
-          })
-          suggestions = suggestionProducts.map((s: any) => ({
-            id: s.id,
-            name: s.name,
-            price: s.price,
-            image: JSON.parse(s.images || '[]')[0] || '/images/placeholder.jpg',
-            category: s.category?.name || '',
-            categorySlug: s.category?.slug || '',
-          }))
-        } catch {
-          // Non-critical — suggestions are optional
         }
-
-        return NextResponse.json({
-          status: 'completed',
-          imageUrl,
-          productName,
-          categorySlug,
-          strategy: 'edit-both',
-          faceScore: 8,
-          productScore: 8,
-          suggestions,
-          elapsed: `${elapsed}s`,
-        })
+      } catch (err) {
+        console.error('[try-on] edit-both FAILED:', (err as Error).message?.substring(0, 200))
       }
-
-      console.log('[try-on] edit-both returned no image data, trying next strategy...')
-    } catch (err) {
-      const errMsg = (err as Error)?.message || String(err)
-      console.error('[try-on] edit-both FAILED:', errMsg.substring(0, 200))
     }
 
-    // ── Strategy 2: edit-selfie (uses selfie + text description of product) ──
-    console.log(`[try-on] Strategy 2: edit-selfie, size: ${size}`)
-    try {
-      const prompt = `Professional fashion photograph of the person in this image, now ${placement}. The product is a ${productName}. Make it look natural and realistic. Keep the exact same face, skin tone, hair, and eye color. Studio lighting, photorealistic, 8K quality.`
+    // ── Strategy 2: edit-selfie (internal API only — uses selfie + text description) ──
+    if (!isPublicAPI(config)) {
+      console.log(`[try-on] Strategy 2: edit-selfie (internal API), size: ${size}`)
+      try {
+        const prompt = `Professional fashion photograph of the person in this image, now ${placement}. The product is a ${productName}. Make it look natural and realistic. Keep the exact same face, skin tone, hair, and eye color. Studio lighting, photorealistic, 8K quality.`
 
-      const b64 = await editImage(
-        prompt,
-        [{ url: selfieData }],
-        size
-      )
+        const b64 = await editImage(prompt, [{ url: selfieData }], size)
 
-      if (b64) {
-        const imageUrl = `data:image/png;base64,${b64}`
-        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1)
-        console.log(`[try-on] edit-selfie SUCCESS in ${elapsed}s, ${(b64.length / 1024).toFixed(0)} KB`)
-
-        return NextResponse.json({
-          status: 'completed',
-          imageUrl,
-          productName,
-          categorySlug,
-          strategy: 'edit-selfie',
-          faceScore: 7,
-          productScore: 6,
-          suggestions: [],
-          elapsed: `${elapsed}s`,
-        })
+        if (b64) {
+          const imageUrl = `data:image/png;base64,${b64}`
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(1)
+          console.log(`[try-on] edit-selfie SUCCESS in ${elapsed}s`)
+          return NextResponse.json({
+            status: 'completed',
+            imageUrl,
+            productName,
+            categorySlug,
+            strategy: 'edit-selfie',
+            faceScore: 7,
+            productScore: 6,
+            suggestions: [],
+            elapsed: `${elapsed}s`,
+          })
+        }
+      } catch (err) {
+        console.error('[try-on] edit-selfie FAILED:', (err as Error).message?.substring(0, 200))
       }
-
-      console.log('[try-on] edit-selfie returned no image data, trying next strategy...')
-    } catch (err) {
-      const errMsg = (err as Error)?.message || String(err)
-      console.error('[try-on] edit-selfie FAILED:', errMsg.substring(0, 200))
     }
 
-    // ── Strategy 3: create (text-to-image fallback) ──
-    console.log(`[try-on] Strategy 3: create (text-to-image), size: ${size}`)
+    // ── Strategy 3: text-to-image (works on BOTH public and internal API) ──
+    // This is the PRIMARY strategy for the public API
+    console.log(`[try-on] Strategy 3: text-to-image (${isPublicAPI(config) ? 'public' : 'internal'} API), size: ${size}`)
     try {
       const bodyType = categorySlug === 'sarees' || categorySlug === 'fashion'
         ? 'Full-body professional fashion photograph'
@@ -476,21 +555,26 @@ export async function POST(request: NextRequest) {
         ? 'Close-up professional beauty photograph from chest up'
         : 'Professional fashion photograph'
 
-      const prompt = `${bodyType} of a person ${placement}. Product: ${productName}. Photorealistic, studio lighting, 8K, high detail, professional fashion photography.`
+      const prompt = `${bodyType} of an Indian person ${placement}. Product: ${productName}. The person has a confident, elegant expression. Photorealistic, studio lighting, 8K, high detail, professional fashion photography, clean background.`
 
-      const b64 = await generateImage(prompt, size)
+      // Try async first (better for Vercel timeout), fall back to sync
+      let b64 = await generateImageAsync(prompt, size)
+
+      if (!b64) {
+        console.log('[try-on] Async generation failed, trying sync...')
+        b64 = await generateImage(prompt, size)
+      }
 
       if (b64) {
         const imageUrl = `data:image/png;base64,${b64}`
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1)
-        console.log(`[try-on] create SUCCESS in ${elapsed}s, ${(b64.length / 1024).toFixed(0)} KB`)
-
+        console.log(`[try-on] text-to-image SUCCESS in ${elapsed}s`)
         return NextResponse.json({
           status: 'completed',
           imageUrl,
           productName,
           categorySlug,
-          strategy: 'create-detailed',
+          strategy: 'text-to-image',
           faceScore: 4,
           productScore: 6,
           suggestions: [],
@@ -499,7 +583,16 @@ export async function POST(request: NextRequest) {
       }
     } catch (err) {
       const errMsg = (err as Error)?.message || String(err)
-      console.error('[try-on] create FAILED:', errMsg.substring(0, 200))
+      console.error('[try-on] text-to-image FAILED:', errMsg.substring(0, 300))
+
+      // If it's an auth error, return a clear message
+      if (errMsg.includes('auth') || errMsg.includes('Authentication') || errMsg.includes('401')) {
+        return NextResponse.json({
+          error: 'Z.AI API key is invalid or expired. Please update your ZAI_API_KEY on Vercel.',
+          detail: errMsg.substring(0, 300),
+          help: 'Go to https://z.ai → API Keys to create a new key, then update ZAI_API_KEY in Vercel environment variables.',
+        }, { status: 401 })
+      }
     }
 
     // All strategies failed
@@ -529,35 +622,77 @@ export async function GET(request: NextRequest) {
   if (check === 'health') {
     try {
       const config = getZAIConfig()
-      // Quick connectivity test — just check if we can reach the Z.AI API
-      const testResponse = await fetch(`${config.baseUrl}/models`, {
-        headers: getZAIHeaders(config),
-        signal: AbortSignal.timeout(10000),
-      })
+      const publicAPI = isPublicAPI(config)
+
+      // Test API connectivity with a simple request
+      let aiReachable = false
+      let apiMessage = ''
+
+      if (publicAPI) {
+        // For public API, try to generate a tiny test image
+        try {
+          const testResponse = await fetch(`${config.baseUrl}/images/generations`, {
+            method: 'POST',
+            headers: getZAIHeaders(config),
+            body: JSON.stringify({
+              model: 'cogview-4',
+              prompt: 'test',
+              size: '1280x1280',
+            }),
+            signal: AbortSignal.timeout(15000),
+          })
+
+          if (testResponse.ok) {
+            aiReachable = true
+            apiMessage = 'Public API is reachable and authenticated'
+          } else {
+            const errBody = await testResponse.text()
+            if (testResponse.status === 401 || errBody.includes('auth')) {
+              apiMessage = 'API key is invalid or expired — update ZAI_API_KEY'
+            } else {
+              apiMessage = `API returned status ${testResponse.status}`
+            }
+          }
+        } catch (err) {
+          apiMessage = `Cannot reach API: ${(err as Error).message?.substring(0, 100)}`
+        }
+      } else {
+        // For internal API, try /models endpoint
+        try {
+          const testResponse = await fetch(`${config.baseUrl}/models`, {
+            headers: getZAIHeaders(config),
+            signal: AbortSignal.timeout(10000),
+          })
+          aiReachable = testResponse.ok
+          apiMessage = testResponse.ok
+            ? 'Internal API is reachable'
+            : `API returned status ${testResponse.status}`
+        } catch (err) {
+          apiMessage = `Cannot reach internal API: ${(err as Error).message?.substring(0, 100)}`
+        }
+      }
+
       return NextResponse.json({
-        status: testResponse.ok ? 'ok' : 'degraded',
-        ai: testResponse.ok ? 'reachable' : 'unreachable',
-        baseUrl: config.baseUrl,
-        message: testResponse.ok
-          ? 'Try-on service is ready'
-          : `API returned status ${testResponse.status}`,
-      })
+        status: aiReachable ? 'ok' : 'error',
+        ai: aiReachable ? 'reachable' : 'unreachable',
+        apiType: publicAPI ? 'public' : 'internal',
+        baseUrl: config.baseUrl.replace(/\/$/, ''),
+        message: apiMessage,
+      }, { status: aiReachable ? 200 : 503 })
+
     } catch (err) {
       return NextResponse.json({
         status: 'error',
         ai: 'unreachable',
         baseUrl: process.env.ZAI_BASE_URL || '(not set)',
-        message: (err as Error).message?.substring(0, 200),
+        message: (err as Error).message?.substring(0, 300),
       }, { status: 503 })
     }
   }
 
   if (check === 'db') {
-    // Test database connectivity
     try {
-      const { db } = await import('@/lib/db')
-      const { ensureSeeded } = await import('@/lib/auto-seed')
-      await ensureSeeded()
+      await ensureDBReady()
       const count = await db.product.count()
       return NextResponse.json({
         status: 'ok',
@@ -572,28 +707,24 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  // For backward compatibility
-  const jobId = searchParams.get('jobId')
-  if (jobId) {
-    return NextResponse.json({
-      jobId,
-      status: 'failed',
-      error: 'This endpoint no longer uses background jobs. The POST request now returns the result directly.',
-    })
-  }
-
+  // Default status page
+  const config = getZAIConfig()
   return NextResponse.json({
     status: 'ready',
     message: 'Send a POST request with productId and selfieData to generate a style preview',
+    apiType: isPublicAPI(config) ? 'public' : 'internal',
     envCheck: {
       ZAI_BASE_URL: process.env.ZAI_BASE_URL ? 'SET' : 'MISSING',
       ZAI_API_KEY: process.env.ZAI_API_KEY ? 'SET' : 'MISSING',
-      ZAI_CHAT_ID: process.env.ZAI_CHAT_ID ? 'SET' : 'MISSING',
-      ZAI_USER_ID: process.env.ZAI_USER_ID ? 'SET' : 'MISSING',
-      ZAI_TOKEN: process.env.ZAI_TOKEN ? 'SET' : 'MISSING',
+      ZAI_CHAT_ID: process.env.ZAI_CHAT_ID ? 'SET' : '(optional)',
+      ZAI_USER_ID: process.env.ZAI_USER_ID ? 'SET' : '(optional)',
+      ZAI_TOKEN: process.env.ZAI_TOKEN ? 'SET' : '(optional)',
       NEXT_PUBLIC_BASE_URL: process.env.NEXT_PUBLIC_BASE_URL || '(not set)',
       VERCEL_URL: process.env.VERCEL_URL || '(not set)',
     },
+    hint: !isPublicAPI(config)
+      ? 'WARNING: Using internal API which is NOT reachable from Vercel! Change ZAI_BASE_URL to https://api.z.ai/api/paas/v4'
+      : 'Using public API — correct for Vercel deployment',
   })
 }
 
