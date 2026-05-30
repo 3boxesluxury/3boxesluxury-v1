@@ -28,8 +28,7 @@ export interface AuthUser {
 
 /**
  * Authenticate a request using JWT first, then session as fallback.
- * CRITICAL: When DB lookup fails (cold start, empty table), uses JWT payload directly.
- * This prevents admin logout on Vercel cold starts.
+ * When DB lookup fails (cold start, empty table), uses JWT payload directly.
  */
 export async function authenticate(
   request: NextRequest
@@ -65,7 +64,6 @@ export async function authenticate(
       }
 
       // DB lookup returned null but JWT is valid — use JWT payload directly
-      // This happens on Vercel cold starts when User table is empty
       if (decoded.userId && decoded.email && decoded.role) {
         return {
           user: {
@@ -79,8 +77,7 @@ export async function authenticate(
         }
       }
     } catch (dbErr: any) {
-      // DB error (table doesn't exist, cold start, etc.) — use JWT payload directly
-      console.error('[auth] DB lookup failed, using JWT payload:', dbErr?.message || dbErr)
+      // DB error — use JWT payload directly
       if (decoded.userId && decoded.email && decoded.role) {
         return {
           user: {
@@ -95,17 +92,15 @@ export async function authenticate(
       }
     }
   } catch (jwtErr: any) {
-    // JWT expired or invalid — don't fall through to session for expired tokens
     if (jwtErr.name === 'TokenExpiredError') {
       return {
         user: null,
         error: NextResponse.json({ error: 'Token expired' }, { status: 401 }),
       }
     }
-    // Other JWT error — try session fallback
   }
 
-  // Strategy 2: Database session (FALLBACK for old session tokens)
+  // Strategy 2: Database session fallback
   try {
     const sessionUser = await getSessionAsync(token)
     if (!sessionUser) {
@@ -115,7 +110,6 @@ export async function authenticate(
       }
     }
 
-    // Try DB lookup for extended data
     try {
       const dbUser = await db.user.findUnique({
         where: { id: sessionUser.id },
@@ -131,7 +125,7 @@ export async function authenticate(
         return { user: dbUser as AuthUser, error: null }
       }
     } catch {
-      // DB lookup failed — use session data directly
+      // DB failed — use session data
     }
 
     return {
@@ -153,7 +147,28 @@ export async function authenticate(
 }
 
 /**
- * Get session info from request (lightweight).
+ * Verify auth - lightweight check returning basic user info.
+ * Used by routes importing from auth-api.ts or auth.ts directly.
+ */
+export async function verifyAuth(
+  request: NextRequest
+): Promise<{ id: string; email: string; name: string; role: string } | null> {
+  try {
+    const result = await authenticate(request)
+    if (result.error) return null
+    return {
+      id: result.user.id,
+      email: result.user.email,
+      name: result.user.name,
+      role: result.user.role,
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Get session info from request.
  */
 export async function getSessionFromRequest(
   request: NextRequest
