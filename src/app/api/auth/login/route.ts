@@ -1,11 +1,12 @@
 /**
- * Login Route — FIXED for Vercel Serverless (v3)
+ * Login Route — FIXED for Vercel Serverless (v4)
  *
- * v2 BUG: ensureDBReady() was imported but never actually called.
- * Plus, if db.ts wasn't updated, ensureDBReady doesn't exist.
+ * v3 BUG: await ensureSeeded() at the top BLOCKS forever on Vercel
+ * — seeding 65 products takes too long, function times out, login hangs.
  *
- * v3 FIX: Calls ensureSeeded() DIRECTLY from auto-seed module.
- * This works regardless of whether db.ts has the $extends() or not.
+ * v4 FIX: Try DB query FIRST (fast path for warm starts).
+ * Only call ensureSeeded() if the query fails (cold start).
+ * Add 10-second timeout to prevent infinite loading.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -28,50 +29,48 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // ── CRITICAL: Seed the database BEFORE querying ──
-    // On Vercel cold starts, /tmp is empty — no tables exist.
-    // We MUST call ensureSeeded() to create tables + seed data.
-    try {
-      const { ensureSeeded } = await import('@/lib/auto-seed');
-      await ensureSeeded();
-      console.log('[login] Database seeded successfully');
-    } catch (seedErr) {
-      console.error('[login] Auto-seed failed:', (seedErr as Error).message?.substring(0, 300));
-    }
-
-    // Find user by email — with retry logic
+    // Find user by email — try DB first, seed only if needed
     let user;
     let dbAttempts = 0;
     const maxAttempts = 3;
 
     while (dbAttempts < maxAttempts) {
       try {
+        // Try the query first (fast on warm starts)
         user = await db.user.findUnique({
           where: { email: email.toLowerCase().trim() },
         });
-        break;
+        break; // Success — no seeding needed
       } catch (dbErr: any) {
         dbAttempts++;
         const errMsg = dbErr?.message || '';
         console.error(`[login] DB lookup attempt ${dbAttempts} failed:`, errMsg.substring(0, 200));
 
+        // Only seed if table doesn't exist (cold start)
         if (errMsg.includes('does not exist') || errMsg.includes('no such table')) {
+          console.log(`[login] Table missing — seeding database (attempt ${dbAttempts})...`);
+
+          // Call ensureSeeded with a 10-second timeout
           try {
-            const { ensureSeeded } = await import('@/lib/auto-seed');
-            await ensureSeeded();
-            console.log(`[login] Re-seeded on attempt ${dbAttempts}`);
-          } catch {
-            // Seeding failed again
+            const seedPromise = import('@/lib/auto-seed').then(m => m.ensureSeeded());
+            const timeoutPromise = new Promise<void>((_, reject) =>
+              setTimeout(() => reject(new Error('Seed timeout')), 10000)
+            );
+            await Promise.race([seedPromise, timeoutPromise]);
+            console.log('[login] Database seeded successfully');
+          } catch (seedErr: any) {
+            console.error('[login] Seed failed:', seedErr.message?.substring(0, 200));
           }
 
           if (dbAttempts < maxAttempts) {
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            await new Promise(resolve => setTimeout(resolve, 1000));
             continue;
           }
         }
 
+        // Other errors or max retries
         return NextResponse.json(
-          { error: 'Service temporarily unavailable. Please try again in a moment.' },
+          { error: 'Service temporarily unavailable. Please try again.' },
           { status: 503 }
         );
       }
@@ -143,7 +142,7 @@ export async function POST(request: NextRequest) {
       }
     );
 
-    // Try to create a DB session as backup (optional)
+    // Try to create a DB session as backup (optional, won't block)
     try {
       const { createSession, generateToken } = await import('@/lib/sessions');
       const sessionToken = generateToken();
@@ -163,7 +162,6 @@ export async function POST(request: NextRequest) {
       console.log('[login] DB session creation skipped');
     }
 
-    // Return user data and JWT token
     return NextResponse.json({
       user: {
         id: user.id,
