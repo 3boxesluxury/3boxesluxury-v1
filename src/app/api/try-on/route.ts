@@ -24,7 +24,43 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { db, ensureDBReady } from '@/lib/db'
+import { db } from '@/lib/db'
+
+// ── Auto-seed helper (works with or without the updated db.ts) ──────
+// On Vercel, each cold start gets an empty /tmp database.
+// This ensures tables + data exist before ANY query runs.
+
+let _dbSeeded = false
+let _seedPromise: Promise<void> | null = null
+
+async function ensureDBReady(): Promise<void> {
+  if (_dbSeeded) return
+  if (_seedPromise) return _seedPromise
+
+  _seedPromise = (async () => {
+    try {
+      // Try the new db.ts export first
+      const dbModule = await import('@/lib/db') as any
+      if (typeof dbModule.ensureDBReady === 'function') {
+        await dbModule.ensureDBReady()
+        _dbSeeded = true
+        return
+      }
+    } catch {}
+
+    // Fallback: call ensureSeeded directly
+    try {
+      const { ensureSeeded } = await import('@/lib/auto-seed')
+      await ensureSeeded()
+      _dbSeeded = true
+    } catch (err) {
+      _seedPromise = null
+      console.error('[try-on] ensureDBReady failed:', (err as Error).message?.substring(0, 300))
+    }
+  })()
+
+  return _seedPromise
+}
 
 // ── Image sizes supported by Z.AI public API ──────────────────────
 
