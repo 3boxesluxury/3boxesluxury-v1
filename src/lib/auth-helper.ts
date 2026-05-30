@@ -1,6 +1,6 @@
-// Re-export everything from auth.ts (single source of truth)
 export {
   authenticate,
+  verifyAuth,
   requireAdmin,
   requirePermission,
   getSessionFromRequest,
@@ -12,6 +12,5 @@ export {
 
 export type { AuthUser } from './auth'
 
-// Also export sessions for backward compatibility
 export { sessions } from './sessions'
 export type { SessionUser } from './sessions'

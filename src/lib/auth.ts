@@ -26,10 +26,6 @@ export interface AuthUser {
   twoFactorRequired?: boolean
 }
 
-/**
- * Authenticate a request using JWT first, then session as fallback.
- * When DB lookup fails (cold start, empty table), uses JWT payload directly.
- */
 export async function authenticate(
   request: NextRequest
 ): Promise<{ user: AuthUser; error: null } | { user: null; error: NextResponse }> {
@@ -43,11 +39,10 @@ export async function authenticate(
 
   const token = authHeader.replace('Bearer ', '')
 
-  // Strategy 1: JWT verification (PRIMARY - survives cold starts)
+  // Strategy 1: JWT verification
   try {
     const decoded = jwt.verify(token, JWT_SECRET) as JWTPayload
 
-    // Try DB lookup for full user data
     try {
       const dbUser = await db.user.findUnique({
         where: { id: decoded.userId },
@@ -62,33 +57,19 @@ export async function authenticate(
       if (dbUser && dbUser.isActive) {
         return { user: dbUser as AuthUser, error: null }
       }
+    } catch {}
 
-      // DB lookup returned null but JWT is valid — use JWT payload directly
-      if (decoded.userId && decoded.email && decoded.role) {
-        return {
-          user: {
-            id: decoded.userId,
-            email: decoded.email,
-            name: decoded.name || decoded.email,
-            role: decoded.role,
-            isActive: true,
-          } as AuthUser,
-          error: null,
-        }
-      }
-    } catch (dbErr: any) {
-      // DB error — use JWT payload directly
-      if (decoded.userId && decoded.email && decoded.role) {
-        return {
-          user: {
-            id: decoded.userId,
-            email: decoded.email,
-            name: decoded.name || decoded.email,
-            role: decoded.role,
-            isActive: true,
-          } as AuthUser,
-          error: null,
-        }
+    // JWT valid but DB empty (cold start) — use JWT payload directly
+    if (decoded.userId && decoded.email && decoded.role) {
+      return {
+        user: {
+          id: decoded.userId,
+          email: decoded.email,
+          name: decoded.name || decoded.email,
+          role: decoded.role,
+          isActive: true,
+        } as AuthUser,
+        error: null,
       }
     }
   } catch (jwtErr: any) {
@@ -100,56 +81,44 @@ export async function authenticate(
     }
   }
 
-  // Strategy 2: Database session fallback
+  // Strategy 2: Session fallback (for old UUID tokens)
   try {
     const sessionUser = await getSessionAsync(token)
-    if (!sessionUser) {
+    if (sessionUser) {
+      try {
+        const dbUser = await db.user.findUnique({
+          where: { id: sessionUser.id },
+          select: {
+            id: true, email: true, name: true, role: true,
+            adminRole: true, corporateRole: true, isActive: true,
+            approvalStatus: true, emailVerified: true,
+            twoFactorEnabled: true, twoFactorRequired: true,
+          },
+        })
+        if (dbUser && dbUser.isActive) {
+          return { user: dbUser as AuthUser, error: null }
+        }
+      } catch {}
+
       return {
-        user: null,
-        error: NextResponse.json({ error: 'Invalid or expired token' }, { status: 401 }),
+        user: {
+          id: sessionUser.id,
+          email: sessionUser.email,
+          name: sessionUser.name,
+          role: sessionUser.role,
+          isActive: true,
+        } as AuthUser,
+        error: null,
       }
     }
+  } catch {}
 
-    try {
-      const dbUser = await db.user.findUnique({
-        where: { id: sessionUser.id },
-        select: {
-          id: true, email: true, name: true, role: true,
-          adminRole: true, corporateRole: true, isActive: true,
-          approvalStatus: true, emailVerified: true,
-          twoFactorEnabled: true, twoFactorRequired: true,
-        },
-      })
-
-      if (dbUser && dbUser.isActive) {
-        return { user: dbUser as AuthUser, error: null }
-      }
-    } catch {
-      // DB failed — use session data
-    }
-
-    return {
-      user: {
-        id: sessionUser.id,
-        email: sessionUser.email,
-        name: sessionUser.name,
-        role: sessionUser.role,
-        isActive: true,
-      } as AuthUser,
-      error: null,
-    }
-  } catch {
-    return {
-      user: null,
-      error: NextResponse.json({ error: 'Invalid or expired token' }, { status: 401 }),
-    }
+  return {
+    user: null,
+    error: NextResponse.json({ error: 'Invalid or expired token' }, { status: 401 }),
   }
 }
 
-/**
- * Verify auth - lightweight check returning basic user info.
- * Used by routes importing from auth-api.ts or auth.ts directly.
- */
 export async function verifyAuth(
   request: NextRequest
 ): Promise<{ id: string; email: string; name: string; role: string } | null> {
@@ -167,9 +136,6 @@ export async function verifyAuth(
   }
 }
 
-/**
- * Get session info from request.
- */
 export async function getSessionFromRequest(
   request: NextRequest
 ): Promise<AuthUser | null> {
@@ -182,9 +148,6 @@ export async function getSessionFromRequest(
   }
 }
 
-/**
- * Require admin role.
- */
 export async function requireAdmin(
   request: NextRequest
 ): Promise<{ user: AuthUser; error: null } | { user: null; error: NextResponse }> {
@@ -201,34 +164,23 @@ export async function requireAdmin(
   return result
 }
 
-/**
- * Require a specific permission.
- */
 export async function requirePermission(
   request: NextRequest,
   permission?: string
 ): Promise<{ user: AuthUser; error: null } | { user: null; error: NextResponse }> {
   const result = await authenticate(request)
   if (result.error) return result
-
   if (result.user.role === 'admin') return result
-
   return {
     user: null,
     error: NextResponse.json({ error: `Forbidden: ${permission || 'Admin'} access required` }, { status: 403 }),
   }
 }
 
-/**
- * Generate a JWT token for a user
- */
 export function generateJWT(userId: string, email: string, role: string, name?: string): string {
   return jwt.sign({ userId, email, role, name }, JWT_SECRET, { expiresIn: '7d', issuer: '3boxes-luxury' })
 }
 
-/**
- * Extract client IP address from request
- */
 export function getClientIp(request: NextRequest): string {
   const forwarded = request.headers.get('x-forwarded-for')
   if (forwarded) return forwarded.split(',')[0].trim()
@@ -237,16 +189,10 @@ export function getClientIp(request: NextRequest): string {
   return '127.0.0.1'
 }
 
-/**
- * Extract user agent from request
- */
 export function getUserAgent(request: NextRequest): string {
   return request.headers.get('user-agent') || 'Unknown'
 }
 
-/**
- * Parse device info from user agent string
- */
 export function parseDeviceInfo(userAgent: string): string {
   if (/iPhone/i.test(userAgent)) return 'iPhone'
   if (/iPad/i.test(userAgent)) return 'iPad'
