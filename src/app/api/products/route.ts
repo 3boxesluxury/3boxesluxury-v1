@@ -52,6 +52,19 @@ const PLATFORM_LOGO_MAP: Record<string, string> = {
 }
 
 /**
+ * Normalize a category string for fuzzy matching.
+ * FIX: Strips apostrophes so "men's shirts" matches "mens-shirts"
+ */
+function normalizeCategory(str: string): string {
+  return str
+    .toLowerCase()
+    .replace(/['']/g, '')   // Remove curly and straight apostrophes
+    .replace(/[^a-z0-9]+/g, '-')  // Replace non-alphanumeric with hyphens
+    .replace(/-+/g, '-')    // Collapse multiple hyphens
+    .replace(/^-|-$/g, '')  // Trim leading/trailing hyphens
+}
+
+/**
  * Map a Shopify product (already converted via shopifyProductToAppProduct)
  * to the same format the frontend expects from the local DB query.
  * Also merges with local DB data when available.
@@ -177,22 +190,36 @@ async function handleShopifySource(searchParams: URLSearchParams) {
   }
 
   // Filter by category if specified
-  // Support both slug-based (e.g., "mens-shirts") and name-based (e.g., "Men's Shirts") matching
+  // FIX: Improved category matching — strips apostrophes so "men's shirts" matches "mens-shirts"
   let filtered = appProducts
   if (category) {
-    const categoryLower = category.toLowerCase()
-    // Try to resolve slug to collection name for matching
-    const resolvedName = slugToNameMap.get(categoryLower)
-    
+    const categoryNorm = normalizeCategory(category)
+    const resolvedName = slugToNameMap.get(category.toLowerCase())
+
     filtered = filtered.filter((p) => {
       const pCategory = p.category?.toLowerCase()
       if (!pCategory) return false
-      // Match by exact category name, by slug, or by resolved collection name
-      return pCategory === categoryLower 
-        || pCategory.replace(/[^a-z0-9]+/g, '-') === categoryLower
-        || (resolvedName && pCategory === resolvedName)
-        || pCategory.includes(categoryLower.replace(/-/g, ' '))
-        || categoryLower.includes(pCategory.replace(/[^a-z0-9]+/g, ' '))
+
+      const pCategoryNorm = normalizeCategory(pCategory)
+
+      // Match strategies (ordered by specificity):
+      // 1. Normalized match (strips apostrophes, hyphens): "men's shirts" → "mens-shirts"
+      if (pCategoryNorm === categoryNorm) return true
+
+      // 2. Exact slug match
+      if (pCategory.replace(/[^a-z0-9]+/g, '-') === category.toLowerCase()) return true
+
+      // 3. Resolved collection name match
+      if (resolvedName && pCategory === resolvedName) return true
+
+      // 4. Substring match on normalized strings
+      if (pCategoryNorm.includes(categoryNorm) || categoryNorm.includes(pCategoryNorm)) return true
+
+      // 5. Space-joined match (legacy)
+      if (pCategory.includes(category.toLowerCase().replace(/-/g, ' '))) return true
+      if (category.toLowerCase().includes(pCategory.replace(/[^a-z0-9]+/g, ' '))) return true
+
+      return false
     })
   }
 
@@ -380,25 +407,41 @@ async function handleShopifySource(searchParams: URLSearchParams) {
   const skip = (page - 1) * limit
   const paginated = allProducts.slice(skip, skip + limit)
 
+  // FIX: Don't cache empty responses on Vercel CDN
+  const headers: Record<string, string> = total === 0
+    ? { 'Cache-Control': 'no-store' }
+    : { 'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=120' }
+
   return NextResponse.json({
     products: paginated,
     total,
     page,
     totalPages: Math.ceil(total / limit),
-  }, { headers: { 'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=120' } })
+  }, { headers })
 }
 
 /**
  * Handle local DB sourced product fetching (original behavior, preserved)
- * Returns empty results gracefully if DB tables don't exist yet.
+ * FIX: Added retry logic — if 0 products, wait 2s and retry once (seed may still be running)
+ * FIX: Don't cache empty responses on Vercel CDN
  */
 async function handleLocalSource(searchParams: URLSearchParams) {
   try {
-    return await handleLocalSourceInner(searchParams)
+    let result = await handleLocalSourceInner(searchParams)
+
+    // FIX: Retry logic — if we got 0 products, the seed might still be running.
+    // Wait 2 seconds and retry once.
+    const data = await result.clone().json()
+    if (data.products && data.products.length === 0 && data.total === 0) {
+      console.log('[products] Got 0 local products — waiting 2s and retrying...')
+      await new Promise(resolve => setTimeout(resolve, 2000))
+      result = await handleLocalSourceInner(searchParams)
+    }
+
+    return result
   } catch (error: any) {
     console.error('[products] Local source error:', error.message)
-    // Return empty results instead of crashing
-    // IMPORTANT: Use no-store to prevent CDN from caching empty error responses
+    // Return empty results with no-store cache (don't cache errors)
     return NextResponse.json({
       products: [],
       total: 0,
@@ -561,18 +604,17 @@ async function handleLocalSourceInner(searchParams: URLSearchParams) {
     createdAt: p.createdAt,
   }))
 
-  // Don't cache empty responses — only cache when we have data
-  const hasData = transformedProducts.length > 0
-  const cacheHeaders = hasData
-    ? { 'Cache-Control': 'public, s-maxage=30, stale-while-revalidate=60' }
-    : { 'Cache-Control': 'no-store' }
+  // FIX: Don't cache empty responses on Vercel CDN
+  const headers: Record<string, string> = total === 0
+    ? { 'Cache-Control': 'no-store' }
+    : { 'Cache-Control': 'public, s-maxage=30, stale-while-revalidate=60' }
 
   return NextResponse.json({
     products: transformedProducts,
     total,
     page,
     totalPages: Math.ceil(total / limit),
-  }, { headers: cacheHeaders })
+  }, { headers })
 }
 
 export async function GET(request: NextRequest) {
@@ -582,12 +624,6 @@ export async function GET(request: NextRequest) {
 
     const { searchParams } = new URL(request.url)
     const sourceParam = searchParams.get('source') // 'shopify' or 'local'
-
-    // RETRY LOGIC: On Vercel cold starts, ensureSeeded() might finish but
-    // another concurrent process might still be writing products to the DB.
-    // If local DB returns 0 products on first try, wait and retry once.
-    let retryCount = 0
-    const maxRetries = 2
 
     // If source=shopify is explicitly requested, try Shopify first
     if (sourceParam === 'shopify') {
@@ -611,23 +647,7 @@ export async function GET(request: NextRequest) {
 
     // If source=local is explicitly requested, use local DB
     if (sourceParam === 'local') {
-      let localResult = await handleLocalSource(searchParams)
-      let localData = await localResult.clone().json()
-
-      // Retry if empty on cold start
-      if (localData.products?.length === 0) {
-        console.log('[products] source=local empty, retrying in 2s...')
-        await new Promise(r => setTimeout(r, 2000))
-        localResult = await handleLocalSource(searchParams)
-        localData = await localResult.clone().json()
-      }
-
-      const hasData = localData.products?.length > 0
-      const cacheHeaders = hasData
-        ? { 'Cache-Control': 'public, s-maxage=30, stale-while-revalidate=60' }
-        : { 'Cache-Control': 'no-store' }
-
-      return NextResponse.json(localData, { headers: cacheHeaders })
+      return await handleLocalSource(searchParams)
     }
 
     // Default behavior: ALWAYS use local DB first to ensure auto-seeded products show up.
@@ -645,42 +665,38 @@ export async function GET(request: NextRequest) {
     //   3. Return combined results
 
     // Step 1: Get local DB products (always works, even on Vercel cold start)
-    //         Retry if empty — Vercel cold-start race condition fix
-    let localResult = await handleLocalSource(searchParams)
-    let localData = await localResult.clone().json()
-
-    if (localData.products?.length === 0 && retryCount < maxRetries) {
-      console.log('[products] Empty result after seed, retrying in 2s...')
-      await new Promise(r => setTimeout(r, 2000))
-      retryCount++
-      localResult = await handleLocalSource(searchParams)
-      localData = await localResult.clone().json()
-    }
+    const localResult = await handleLocalSource(searchParams)
 
     // Step 2: If Shopify is configured, try to also fetch Shopify products and merge
     if (isShopifyConfigured()) {
       try {
         const shopifyResult = await handleShopifySource(searchParams)
+        // Clone the response before reading the body, so we don't consume it
         const shopifyClone = shopifyResult.clone()
         const shopifyData = await shopifyClone.json()
 
         if (shopifyData.products && shopifyData.products.length > 0) {
+          // Parse local result too
+          const localClone = localResult.clone()
+          const localData = await localClone.json()
+
           // Merge: local products first, then Shopify products not already in local
           const localIds = new Set(localData.products.map((p: any) => p.id))
           const shopifyOnly = shopifyData.products.filter((p: any) => !localIds.has(p.id))
           const mergedProducts = [...localData.products, ...shopifyOnly]
           const mergedTotal = (localData.total || 0) + shopifyOnly.length
-          const hasData = mergedProducts.length > 0
-          const cacheHeaders = hasData
-            ? { 'Cache-Control': 'public, s-maxage=30, stale-while-revalidate=60' }
-            : { 'Cache-Control': 'no-store' }
+
+          // FIX: Don't cache empty merged results
+          const headers: Record<string, string> = mergedProducts.length === 0
+            ? { 'Cache-Control': 'no-store' }
+            : { 'Cache-Control': 'public, s-maxage=30, stale-while-revalidate=60' }
 
           return NextResponse.json({
             products: mergedProducts,
             total: mergedTotal,
             page: localData.page || 1,
             totalPages: Math.ceil(mergedTotal / 50),
-          }, { headers: cacheHeaders })
+          }, { headers })
         }
       } catch (error) {
         console.error('[products] Shopify merge failed, returning local DB only:', error)
@@ -689,13 +705,7 @@ export async function GET(request: NextRequest) {
     }
 
     // Return local DB result (always available)
-    // Don't cache empty responses — prevents CDN from caching "no products"
-    const finalHasData = localData.products?.length > 0
-    const finalCacheHeaders = finalHasData
-      ? { 'Cache-Control': 'public, s-maxage=30, stale-while-revalidate=60' }
-      : { 'Cache-Control': 'no-store' }
-
-    return NextResponse.json(localData, { headers: finalCacheHeaders })
+    return localResult
   } catch (error) {
     console.error('Error fetching products:', error)
     return NextResponse.json(

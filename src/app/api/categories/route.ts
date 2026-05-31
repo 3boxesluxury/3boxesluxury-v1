@@ -138,9 +138,11 @@ async function handleLocalNewArrivalCategories() {
 
 /**
  * Fetch categories from local DB (original behavior, preserved)
+ * FIX: Added retry logic — if 0 categories, wait 2s and retry once (seed may still be running)
+ * FIX: Don't cache empty responses on Vercel CDN
  */
 async function handleLocalCategories() {
-  const categories = await db.category.findMany({
+  let categories = await db.category.findMany({
     orderBy: { name: 'asc' },
     include: {
       _count: {
@@ -148,6 +150,20 @@ async function handleLocalCategories() {
       },
     },
   })
+
+  // FIX: Retry logic — if 0 categories, seed might still be running
+  if (categories.length === 0) {
+    console.log('[categories] Got 0 local categories — waiting 2s and retrying...')
+    await new Promise(resolve => setTimeout(resolve, 2000))
+    categories = await db.category.findMany({
+      orderBy: { name: 'asc' },
+      include: {
+        _count: {
+          select: { products: true },
+        },
+      },
+    })
+  }
 
   const transformed = categories.map((cat) => ({
     id: cat.id,
@@ -160,7 +176,12 @@ async function handleLocalCategories() {
     source: 'local' as const,
   }))
 
-  return NextResponse.json({ categories: transformed })
+  // FIX: Don't cache empty responses on Vercel CDN
+  const headers: Record<string, string> = transformed.length === 0
+    ? { 'Cache-Control': 'no-store' }
+    : { 'Cache-Control': 'public, s-maxage=30, stale-while-revalidate=60' }
+
+  return NextResponse.json({ categories: transformed }, { headers })
 }
 
 export async function GET(request?: NextRequest) {
@@ -216,21 +237,11 @@ export async function GET(request?: NextRequest) {
     // This ensures auto-seeded categories ALWAYS show on Vercel.
 
     // Step 1: Always get local categories first (auto-seeded + admin-added)
-    //         Retry if empty — Vercel cold-start race condition fix
     let localCategories: Array<any> = []
     try {
-      let localResult = await handleLocalCategories()
-      let localData = await localResult.json()
+      const localResult = await handleLocalCategories()
+      const localData = await localResult.json()
       localCategories = localData.categories || []
-
-      // Retry once if empty (seeding might still be in progress)
-      if (localCategories.length === 0) {
-        console.log('[categories] Empty result after seed, retrying in 2s...')
-        await new Promise(r => setTimeout(r, 2000))
-        localResult = await handleLocalCategories()
-        localData = await localResult.json()
-        localCategories = localData.categories || []
-      }
     } catch (error) {
       console.error('[categories] Local categories fetch failed:', error)
     }
@@ -261,7 +272,6 @@ export async function GET(request?: NextRequest) {
     }
 
     // Return local categories (always available from auto-seed)
-    // Don't cache empty responses — prevents CDN from caching "no categories"
     if (localCategories.length > 0) {
       return NextResponse.json(
         { categories: localCategories },
