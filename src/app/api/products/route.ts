@@ -398,12 +398,13 @@ async function handleLocalSource(searchParams: URLSearchParams) {
   } catch (error: any) {
     console.error('[products] Local source error:', error.message)
     // Return empty results instead of crashing
+    // IMPORTANT: Use no-store to prevent CDN from caching empty error responses
     return NextResponse.json({
       products: [],
       total: 0,
       page: 1,
       totalPages: 0,
-    })
+    }, { headers: { 'Cache-Control': 'no-store' } })
   }
 }
 
@@ -610,7 +611,23 @@ export async function GET(request: NextRequest) {
 
     // If source=local is explicitly requested, use local DB
     if (sourceParam === 'local') {
-      return await handleLocalSource(searchParams)
+      let localResult = await handleLocalSource(searchParams)
+      let localData = await localResult.clone().json()
+
+      // Retry if empty on cold start
+      if (localData.products?.length === 0) {
+        console.log('[products] source=local empty, retrying in 2s...')
+        await new Promise(r => setTimeout(r, 2000))
+        localResult = await handleLocalSource(searchParams)
+        localData = await localResult.clone().json()
+      }
+
+      const hasData = localData.products?.length > 0
+      const cacheHeaders = hasData
+        ? { 'Cache-Control': 'public, s-maxage=30, stale-while-revalidate=60' }
+        : { 'Cache-Control': 'no-store' }
+
+      return NextResponse.json(localData, { headers: cacheHeaders })
     }
 
     // Default behavior: ALWAYS use local DB first to ensure auto-seeded products show up.
