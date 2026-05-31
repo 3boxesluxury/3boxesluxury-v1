@@ -29,6 +29,7 @@ import {
   XCircle,
   ShoppingBag,
   ShieldCheck,
+  Check,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useState } from 'react';
@@ -47,7 +48,7 @@ interface CouponResult {
 }
 
 export function CheckoutView() {
-  const { cartItems, setView } = useStore();
+  const { cartItems, setView, clearCart } = useStore();
   const { format } = useCurrency();
   const { t } = useTranslation();
 
@@ -65,6 +66,8 @@ export function CheckoutView() {
   const [couponLoading, setCouponLoading] = useState(false);
   const [checkoutLoading, setCheckoutLoading] = useState(false);
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
+  const [orderSuccess, setOrderSuccess] = useState(false);
+  const [orderNumber, setOrderNumber] = useState('');
 
   const DELIVERY_OPTIONS = [
     {
@@ -164,82 +167,67 @@ export function CheckoutView() {
     setDiscount(0);
   };
 
-  const handleShopifyCheckout = async (e: React.FormEvent) => {
+  const handleCheckout = async (e: React.FormEvent) => {
     e.preventDefault();
     setCheckoutError(null);
 
     if (!validate()) return;
 
+    if (cartItems.length === 0) {
+      setCheckoutError('Your cart is empty. Please add products before checkout.');
+      return;
+    }
+
     setCheckoutLoading(true);
     try {
-      // Collect all cart items with their Shopify variant IDs
-      const shopifyItems = cartItems
-        .filter((item) => item.shopifyVariantId)
-        .map((item) => ({
-          variantId: item.shopifyVariantId!,
-          quantity: item.quantity,
-        }));
+      const checkoutItems = cartItems.map((item) => ({
+        productId: item.productId,
+        variantId: item.variantId || undefined,
+        quantity: item.quantity,
+        giftWrapping: giftWrapping,
+        greetingMessage: greetingMessage || null,
+        hidePrice: hidePrice,
+      }));
 
-      if (shopifyItems.length === 0) {
-        setCheckoutError('No products available for Shopify checkout. Please add products to your cart.');
-        return;
-      }
-
-      // Build return URL so Shopify redirects back to our app after payment
-      const appUrl = window.location.origin;
-      const returnUrl = `${appUrl}/?checkout=success`;
-
-      const res = await fetch('/api/shopify/checkout', {
+      const res = await fetch('/api/checkout', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          items: shopifyItems,
-          returnUrl,
+          email: form.email,
+          firstName: form.firstName,
+          lastName: form.lastName,
+          address: form.address,
+          city: form.city,
+          state: form.state,
+          zipCode: form.zipCode,
+          country: form.country,
+          phone: form.phone,
+          items: checkoutItems,
+          deliveryType,
+          occasion: undefined,
+          giftWrapping,
+          giftWrapStyle: giftWrapping ? giftWrapStyle : undefined,
+          greetingMessage: greetingMessage || undefined,
+          hidePrice,
+          couponCode: couponCode || undefined,
+          paymentMethod: 'card',
         }),
       });
 
       const data = await res.json();
 
       if (!res.ok) {
-        throw new Error(data.error || 'Failed to create checkout');
+        throw new Error(data.error || 'Failed to place order');
       }
 
-      if (data.checkoutUrl) {
-        // Save pending checkout data to localStorage so the order-confirmation
-        // page can display details when the user returns from Shopify
-        try {
-          localStorage.setItem('3boxes_pending_checkout', JSON.stringify({
-            items: cartItems.map((item) => ({
-              productId: item.productId,
-              name: item.name,
-              price: item.price,
-              image: item.image,
-              quantity: item.quantity,
-              source: item.source,
-            })),
-            total,
-            subtotal,
-            shipping,
-            tax,
-            discount,
-            email: form.email,
-            deliveryType,
-            timestamp: Date.now(),
-            checkoutId: data.checkoutId || null,
-            method: data.method || 'unknown',
-          }));
-        } catch {
-          // localStorage may be unavailable; non-critical
-        }
+      // Order placed successfully
+      setOrderNumber(data.orderNumber);
+      setOrderSuccess(true);
+      clearCart();
 
-        // Redirect to Shopify's secure checkout
-        window.location.href = data.checkoutUrl;
-      } else {
-        throw new Error('No checkout URL returned');
-      }
     } catch (error: any) {
-      console.error('Shopify checkout error:', error);
-      setCheckoutError(error.message || 'Failed to create Shopify checkout. Please try again.');
+      console.error('Checkout error:', error);
+      setCheckoutError(error.message || 'Failed to place order. Please try again.');
     } finally {
       setCheckoutLoading(false);
     }
@@ -255,6 +243,36 @@ export function CheckoutView() {
       });
     }
   };
+
+  // Order Success View
+  if (orderSuccess) {
+    return (
+      <motion.div
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        className="flex flex-col items-center justify-center py-16 text-center"
+      >
+        <div className="mb-6 flex h-20 w-20 items-center justify-center rounded-full bg-emerald-900/30 border border-emerald-500/30">
+          <Check className="h-10 w-10 text-emerald-400" />
+        </div>
+        <h2 className="text-2xl font-bold text-amber-100">Order Placed Successfully!</h2>
+        <p className="mt-2 text-amber-200/60">Thank you for your purchase</p>
+        <div className="mt-4 rounded-lg border border-amber-900/20 bg-stone-900/60 px-6 py-4">
+          <p className="text-sm text-amber-200/50">Order Number</p>
+          <p className="text-lg font-bold text-amber-400">{orderNumber}</p>
+        </div>
+        <p className="mt-4 max-w-md text-sm text-amber-200/40">
+          A confirmation email has been sent to {form.email}. You can track your order status from your account.
+        </p>
+        <Button
+          onClick={() => setView('home')}
+          className="mt-6 bg-amber-600 text-stone-950 hover:bg-amber-500"
+        >
+          Continue Shopping
+        </Button>
+      </motion.div>
+    );
+  }
 
   if (cartItems.length === 0) {
     return (
@@ -291,13 +309,13 @@ export function CheckoutView() {
       <div className="mt-3 flex items-center gap-2 rounded-lg border border-amber-600/30 bg-amber-900/10 px-4 py-2.5">
         <ShieldCheck className="h-5 w-5 text-amber-500" />
         <div>
-          <p className="text-sm font-semibold text-amber-200">Secure Checkout powered by Shopify</p>
-          <p className="text-xs text-amber-200/40">Your payment information is processed securely by Shopify</p>
+          <p className="text-sm font-semibold text-amber-200">Secure Checkout</p>
+          <p className="text-xs text-amber-200/40">Your payment information is processed securely</p>
         </div>
         <Lock className="ml-auto h-4 w-4 text-amber-500/60" />
       </div>
 
-      <form onSubmit={handleShopifyCheckout}>
+      <form onSubmit={handleCheckout}>
         <div className="mt-6 grid gap-8 lg:grid-cols-3">
           {/* Form Fields */}
           <div className="lg:col-span-2 space-y-8">
@@ -628,13 +646,8 @@ export function CheckoutView() {
                 <div>
                   <p className="text-sm font-medium text-amber-200">Completing your purchase</p>
                   <p className="mt-1 text-xs text-amber-200/50">
-                    When you click &quot;Place Order&quot;, you&apos;ll be redirected to Shopify&apos;s secure checkout
-                    to complete your payment. Shipping details and delivery preferences will be confirmed there.
-                    {cartItems.filter(i => i.shopifyVariantId).length < cartItems.length && (
-                      <span className="mt-1 block text-amber-400/60">
-                        Note: {cartItems.length - cartItems.filter(i => i.shopifyVariantId).length} item(s) without Shopify integration will not be included in checkout.
-                      </span>
-                    )}
+                    When you click &quot;Place Order&quot;, your order will be placed and a confirmation will be sent to your email.
+                    Shipping details and delivery preferences will be processed as selected above.
                   </p>
                 </div>
               </div>
@@ -700,7 +713,7 @@ export function CheckoutView() {
               </div>
             </div>
 
-            {/* Primary Place Order button - redirects to Shopify checkout */}
+            {/* Place Order button */}
             <Button
               type="submit"
               disabled={checkoutLoading}
@@ -710,7 +723,7 @@ export function CheckoutView() {
               {checkoutLoading ? (
                 <>
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Redirecting to secure checkout...
+                  Placing your order...
                 </>
               ) : (
                 <>
@@ -723,7 +736,7 @@ export function CheckoutView() {
             {/* Secure Checkout Badge */}
             <div className="mt-4 flex items-center justify-center gap-1.5 text-amber-200/30">
               <Lock className="h-3 w-3" />
-              <span className="text-xs">Secure Checkout powered by Shopify</span>
+              <span className="text-xs">Secure Checkout</span>
             </div>
 
             {checkoutError && (
