@@ -787,11 +787,32 @@ async function doSeed(): Promise<void> {
   await ensureSchema()
 
   // Step 2: Check if data already exists
+  // IMPORTANT: Check BOTH categories AND products.
+  // If we only check categories, another concurrent cold-start process
+  // might see categories but no products yet (race condition).
   const categoryCount = await db.category.count()
+  const productCount = await db.product.count()
 
-  if (categoryCount > 0) {
+  if (categoryCount > 0 && productCount > 0) {
     isSeeded = true
     return
+  }
+
+  // If categories exist but products don't, another process is still seeding.
+  // Wait a bit for it to finish instead of starting a second seed.
+  if (categoryCount > 0 && productCount === 0) {
+    console.log('[auto-seed] Categories exist but no products — another process may be seeding. Waiting...')
+    for (let i = 0; i < 10; i++) {
+      await new Promise(r => setTimeout(r, 1000))
+      const retryCount = await db.product.count()
+      if (retryCount > 0) {
+        console.log(`[auto-seed] Products now available (${retryCount}) after waiting ${i + 1}s`)
+        isSeeded = true
+        return
+      }
+    }
+    // Still no products after 10 seconds — fall through to seed ourselves
+    console.log('[auto-seed] Still no products after waiting. Starting seed...')
   }
 
   console.log('[auto-seed] Database is empty, seeding...')
