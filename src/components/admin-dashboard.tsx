@@ -2483,7 +2483,7 @@ function ImportTab({ token, onMutate }: { token: string | null; onMutate: () => 
   const [showImport, setShowImport] = useState(false)
   const [error, setError] = useState('')
 
-  const { data: categoriesData } = useQuery({ queryKey: ['categories'], queryFn: () => apiFetch('/api/categories', undefined, token) })
+  const { data: categoriesData } = useQuery({ queryKey: ['categories'], queryFn: () => apiFetch('/api/categories?source=local', undefined, token) })
   const { data: vendorsData } = useQuery({ queryKey: ['vendors-import'], queryFn: () => apiFetch('/api/vendors', undefined, token) })
   const categories = categoriesData?.categories || []
   const vendors = vendorsData?.vendors || []
