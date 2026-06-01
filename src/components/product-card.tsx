@@ -26,7 +26,7 @@ interface Product {
   rating: number;
   reviewCount: number;
   featured: boolean;
-  tags: string[];
+  tags: string[] | string;
   isExternal?: boolean;
   platform?: string;
   sourceUrl?: string;

@@ -40,6 +40,28 @@ function setCache<T>(key: string, data: T): void {
 }
 
 // Platform slug to logo URL mapping
+// Safety: ensure all product fields that should be arrays ARE arrays
+function ensureArrayFields(products: any[]): any[] {
+  return products.map((p) => ({
+    ...p,
+    tags: Array.isArray(p.tags) ? p.tags : (typeof p.tags === 'string' && p.tags ? p.tags.split(',').map((t: string) => t.trim()).filter(Boolean) : []),
+    occasions: Array.isArray(p.occasions) ? p.occasions : (typeof p.occasions === 'string' ? JSON.parse(p.occasions || '[]') : []),
+    recipientTypes: Array.isArray(p.recipientTypes) ? p.recipientTypes : (typeof p.recipientTypes === 'string' ? JSON.parse(p.recipientTypes || '[]') : []),
+    relationships: Array.isArray(p.relationships) ? p.relationships : (typeof p.relationships === 'string' ? JSON.parse(p.relationships || '[]') : []),
+  }))
+}
+
+// Safety: ensure tags/occasions/relationships are always arrays
+function ensureArrayFields(products: any[]): any[] {
+  return products.map((p) => ({
+    ...p,
+    tags: Array.isArray(p.tags) ? p.tags : (typeof p.tags === 'string' && p.tags ? p.tags.split(',').map((t: string) => t.trim()).filter(Boolean) : []),
+    occasions: Array.isArray(p.occasions) ? p.occasions : [],
+    recipientTypes: Array.isArray(p.recipientTypes) ? p.recipientTypes : [],
+    relationships: Array.isArray(p.relationships) ? p.relationships : [],
+  }))
+}
+
 const PLATFORM_LOGO_MAP: Record<string, string> = {
   myntra: '/logos/myntra.png',
   nykaa: '/logos/nykaa.png',
@@ -692,7 +714,7 @@ export async function GET(request: NextRequest) {
             : { 'Cache-Control': 'public, s-maxage=30, stale-while-revalidate=60' }
 
           return NextResponse.json({
-            products: mergedProducts,
+            products: ensureArrayFields(mergedProducts),
             total: mergedTotal,
             page: localData.page || 1,
             totalPages: Math.ceil(mergedTotal / 50),
