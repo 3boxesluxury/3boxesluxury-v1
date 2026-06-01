@@ -519,7 +519,7 @@ function ProductForm({ token, product, onClose, onSaved }: { token: string | nul
 
   return (
     <div className="space-y-4">
-      {error && <div className="rounded-md bg-red-600/10 p-3 text-sm text-red-400">{error}</div>
+      {error && <div className="rounded-md bg-red-600/10 p-3 text-sm text-red-400">{error}</div>}
 
       {/* Image Upload */}
       <div>
