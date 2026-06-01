@@ -566,7 +566,7 @@ function ProductForm({ token, product, onClose, onSaved }: { token: string | nul
           <Select value={form.categoryId} onValueChange={v => setForm(f => ({ ...f, categoryId: v }))}>
             <SelectTrigger className={`${selCls} mt-1`}><SelectValue placeholder="Select category" /></SelectTrigger>
             <SelectContent className={selContentCls}>
-              {categories.map((c: any) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
+              {categories.map((c: any) => <SelectItem key={c.id} value={c.slug || c.id}>{c.name}</SelectItem>)}
             </SelectContent>
           </Select>
         </div>
@@ -2763,7 +2763,7 @@ function ImportProductForm({ token, product, sourceUrl, platform, categories, ve
           <Select value={form.categoryId} onValueChange={v => setForm(f => ({ ...f, categoryId: v }))}>
             <SelectTrigger className={`${selCls} mt-1`}><SelectValue placeholder="Select category" /></SelectTrigger>
             <SelectContent className={selContentCls}>
-              {categories.map((c: any) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
+              {categories.map((c: any) => <SelectItem key={c.id} value={c.slug || c.id}>{c.name}</SelectItem>)}
             </SelectContent>
           </Select>
         </div>
