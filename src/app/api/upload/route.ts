@@ -1,30 +1,30 @@
 /**
  * Image Upload API Route — Works on Vercel Serverless
  *
- * PROBLEM: No /api/upload route existed. On Vercel, the filesystem is
- * read-only, so files can't be saved to disk.
+ * Three storage strategies (in order of priority):
+ * 1. Vercel Blob (@vercel/blob) — Best, needs BLOB_READ_WRITE_TOKEN env var
+ * 2. /tmp filesystem — Works on Vercel, served via /api/uploads/[filename] route
+ * 3. Base64 data URI — Last resort fallback (works but creates large DB entries)
  *
- * FIX: New upload route that matches the admin panel's expectations:
- * - Accepts both "file" (single) and "files" (multiple) form fields
- * - Returns { urls: [...] } for multiple files or { url: "..." } for single
- *
- * Two strategies:
- * 1. Vercel Blob (@vercel/blob) — Best, needs BLOB_READ_WRITE_TOKEN
- * 2. Base64 data URI — Fallback, works immediately
+ * Returns { urls: [...] } matching admin panel expectations
  */
 
 import { NextRequest, NextResponse } from 'next/server'
+import { writeFile, mkdir } from 'fs/promises'
+import path from 'path'
 
 // Try to import @vercel/blob
 let vercelBlob: typeof import('@vercel/blob') | null = null
 try {
   vercelBlob = require('@vercel/blob')
 } catch {
-  console.log('[upload] @vercel/blob not installed, using base64 fallback')
+  console.log('[upload] @vercel/blob not installed, using file/base64 fallback')
 }
 
 const MAX_FILE_SIZE = 5 * 1024 * 1024 // 5MB
 const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml']
+
+const isVercel = process.env.VERCEL === '1'
 
 async function processFile(file: File, folder: string): Promise<string> {
   // Validate file type
@@ -49,13 +49,46 @@ async function processFile(file: File, folder: string): Promise<string> {
       return blob.url
     } catch (blobErr) {
       console.error('[upload] Vercel Blob error:', (blobErr as Error).message?.substring(0, 200))
+      // Fall through to /tmp strategy
+    }
+  }
+
+  // ── Strategy 2: /tmp filesystem (works on Vercel serverless) ──
+  if (isVercel) {
+    try {
+      const uploadDir = path.join('/tmp', 'uploads', folder)
+      await mkdir(uploadDir, { recursive: true })
+
+      const ext = file.name.split('.').pop() || 'jpg'
+      const timestamp = Date.now()
+      const randomStr = Math.random().toString(36).substring(2, 8)
+      const filename = `product-${timestamp}-${randomStr}.${ext}`
+      const filepath = path.join(uploadDir, filename)
+
+      const bytes = await file.arrayBuffer()
+      const buffer = Buffer.from(bytes)
+      await writeFile(filepath, buffer)
+
+      // Images served via /api/uploads/[filename] route
+      const url = `/api/uploads/${filename}`
+      console.log(`[upload] Saved to /tmp: ${url} (${(buffer.length / 1024).toFixed(0)}KB)`)
+      return url
+    } catch (tmpErr) {
+      console.error('[upload] /tmp write error:', (tmpErr as Error).message?.substring(0, 200))
       // Fall through to base64 fallback
     }
   }
 
-  // ── Strategy 2: Base64 data URI ──
+  // ── Strategy 3: Base64 data URI (last resort) ──
+  // WARNING: Creates very large strings in the database — avoid if possible
   const bytes = await file.arrayBuffer()
   const buffer = Buffer.from(bytes)
+
+  // Limit base64 images to 500KB to prevent database bloat
+  if (buffer.length > 500 * 1024) {
+    throw new Error(`Image too large for inline storage (${(buffer.length / 1024).toFixed(0)}KB). Max 500KB without Vercel Blob. Please use a smaller image or configure Vercel Blob.`)
+  }
+
   const base64 = buffer.toString('base64')
   const dataUri = `data:${file.type};base64,${base64}`
   console.log(`[upload] Converted to base64 (${(buffer.length / 1024).toFixed(0)}KB)`)
@@ -113,7 +146,7 @@ export async function POST(request: NextRequest) {
         urls: urls,
         filename: files[0].name,
         size: files[0].size,
-        provider: vercelBlob && process.env.BLOB_READ_WRITE_TOKEN ? 'vercel-blob' : 'base64',
+        provider: vercelBlob && process.env.BLOB_READ_WRITE_TOKEN ? 'vercel-blob' : (isVercel ? 'tmp' : 'base64'),
         ...(errors.length > 0 ? { warnings: errors } : {}),
       })
     }
@@ -121,13 +154,13 @@ export async function POST(request: NextRequest) {
     // Multiple files — return urls array (admin panel expects this)
     return NextResponse.json({
       urls: urls,
-      provider: vercelBlob && process.env.BLOB_READ_WRITE_TOKEN ? 'vercel-blob' : 'base64',
+      provider: vercelBlob && process.env.BLOB_READ_WRITE_TOKEN ? 'vercel-blob' : (isVercel ? 'tmp' : 'base64'),
       ...(errors.length > 0 ? { warnings: errors } : {}),
     })
-  } catch (error) {
-    console.error('[upload] Error:', (error as Error).message?.substring(0, 300))
+  } catch (error: any) {
+    console.error('[upload] Error:', error.message?.substring(0, 300))
     return NextResponse.json(
-      { error: 'Failed to upload files' },
+      { error: `Upload failed: ${error.message || 'Unknown error'}` },
       { status: 500 }
     )
   }
@@ -153,7 +186,7 @@ export async function DELETE(request: NextRequest) {
       }
     }
 
-    return NextResponse.json({ success: true, note: 'Base64 images are stored in the database' })
+    return NextResponse.json({ success: true, note: 'Base64/tmp images are stored in the database/filesystem' })
   } catch (error) {
     return NextResponse.json({ error: 'Failed to delete file' }, { status: 500 })
   }

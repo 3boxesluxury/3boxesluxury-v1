@@ -415,7 +415,9 @@ function ProductsTab({ token, onMutate }: { token: string | null; onMutate: () =
 
 /* ─── Product Form ─── */
 function ProductForm({ token, product, onClose, onSaved }: { token: string | null; product: any; onClose: () => void; onSaved: () => void }) {
-  const { data: categoriesData } = useQuery({ queryKey: ['categories'], queryFn: () => apiFetch('/api/categories', undefined, token) })
+  // FIX: Use ?source=local to always get local category IDs (not Shopify GIDs)
+  // Shopify category IDs like "gid://shopify/Collection/123" don't exist in local DB
+  const { data: categoriesData } = useQuery({ queryKey: ['categories-admin'], queryFn: () => apiFetch('/api/categories?source=local', undefined, token) })
   const { data: vendorsData } = useQuery({ queryKey: ['vendors'], queryFn: () => apiFetch('/api/vendors', undefined, token) })
 
   const categories = categoriesData?.categories || []
@@ -449,19 +451,26 @@ function ProductForm({ token, product, onClose, onSaved }: { token: string | nul
     const remaining = 3 - images.length
     if (remaining <= 0) return
     const toUpload = Array.from(files).slice(0, remaining)
-    setUploading(true)
+    setUploading(true); setError('')
     try {
       const fd = new FormData()
       toUpload.forEach(f => fd.append('files', f))
+      // Do NOT set Content-Type for FormData — browser sets it automatically with boundary
       const res = await fetch('/api/upload', { method: 'POST', headers: authH(token), body: fd })
       if (res.status === 401) { window.dispatchEvent(new Event('auth:unauthorized')); return }
-      const text = await res.text()
-      let data: any
-      try { data = JSON.parse(text) } catch { throw new Error('Upload failed: Server returned invalid response') }
-      if (data.urls) setImages(prev => [...prev, ...data.urls].slice(0, 3))
-      else throw new Error(data.error || 'Upload failed')
+      if (!res.ok) {
+        let errData: any
+        try { errData = await res.json() } catch { throw new Error('Upload failed: Server returned invalid response') }
+        throw new Error(errData.error || 'Upload failed')
+      }
+      const data = await res.json()
+      if (data.urls && data.urls.length > 0) {
+        setImages(prev => [...prev, ...data.urls].slice(0, 3))
+      } else {
+        throw new Error('No image URLs returned from server')
+      }
     } catch (e: any) {
-      setError(e.message)
+      setError(`Image upload failed: ${e.message}`)
     } finally {
       setUploading(false)
     }
@@ -471,18 +480,25 @@ function ProductForm({ token, product, onClose, onSaved }: { token: string | nul
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => { if (e.target.files?.length) handleUpload(e.target.files) }
 
   const handleSubmit = async () => {
-    if (!form.name || !form.price || !form.categoryId) { setError('Name, price, and category are required'); return }
+    if (!form.name || !form.price || !form.categoryId) { setError('Name, price, and category are required (make sure to select a category from the dropdown)'); return }
+    if (!form.description) { setError('Description is required'); return }
+    if (uploading) { setError('Please wait for image upload to complete'); return }
     setSaving(true); setError('')
     try {
+      // Build a clean body with explicit fields — avoid spreading form which includes empty strings
       const body = {
-        ...form,
-        price: parseFloat(form.price),
+        name: form.name,
+        description: form.description,
+        price: parseFloat(form.price) || 0,
         compareAtPrice: form.compareAtPrice ? parseFloat(form.compareAtPrice) : null,
         costPrice: form.costPrice ? parseFloat(form.costPrice) : null,
-        stock: parseInt(form.stock),
-        reorderLevel: parseInt(form.reorderLevel),
+        sku: form.sku || null,
+        categoryId: form.categoryId,
+        stock: parseInt(form.stock) || 0,
+        reorderLevel: parseInt(form.reorderLevel) || 5,
+        featured: form.featured || false,
         images,
-        tags: form.tags ? form.tags.split(',').map(t => t.trim()).filter(Boolean) : [],
+        tags: form.tags ? form.tags.split(',').map((t: string) => t.trim()).filter(Boolean) : [],
         vendorId: form.vendorId === 'none' ? null : form.vendorId || null,
       }
       if (product) {
@@ -492,7 +508,10 @@ function ProductForm({ token, product, onClose, onSaved }: { token: string | nul
       }
       onSaved()
     } catch (e: any) {
-      setError(e.message)
+      // Show the full API error message so we can debug
+      const errMsg = e.message || 'Failed to save product. Please try again.'
+      console.error('[ProductForm] Save error:', errMsg)
+      setError(errMsg)
     } finally {
       setSaving(false)
     }
@@ -500,7 +519,7 @@ function ProductForm({ token, product, onClose, onSaved }: { token: string | nul
 
   return (
     <div className="space-y-4">
-      {error && <div className="rounded-md bg-red-600/10 p-3 text-sm text-red-400">{error}</div>}
+      {error && <div className="rounded-md bg-red-600/10 p-3 text-sm text-red-400">{error}</div>
 
       {/* Image Upload */}
       <div>
