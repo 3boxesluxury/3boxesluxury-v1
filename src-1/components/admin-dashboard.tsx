@@ -53,22 +53,10 @@ const defCls = 'bg-stone-600/20 text-stone-400 border-stone-600/30'
 const authH = (t: string | null) => t ? { Authorization: `Bearer ${t}` } : {}
 
 async function apiFetch(url: string, opts: RequestInit = {}, token?: string | null) {
-  try {
-    const res = await fetch(url, { ...opts, headers: { 'Content-Type': 'application/json', ...authH(token), ...opts.headers } })
-    if (res.status === 401) {
-      // Only logout if it's a genuine auth failure, not a DB cold-start issue
-      const data = await res.json().catch(() => ({}))
-      if (data.error?.includes('expired') || data.error?.includes('Authorization header required')) {
-        window.dispatchEvent(new Event('auth:unauthorized'))
-      }
-      throw new Error(data.error || 'Unauthorized')
-    }
-    if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.error || `Error ${res.status}`) }
-    return res.json()
-  } catch (e: any) {
-    if (e.message === 'Unauthorized') throw e
-    throw e
-  }
+  const res = await fetch(url, { ...opts, headers: { 'Content-Type': 'application/json', ...authH(token), ...opts.headers } })
+  if (res.status === 401) { window.dispatchEvent(new Event('auth:unauthorized')); throw new Error('Unauthorized') }
+  if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.error || `Error ${res.status}`) }
+  return res.json()
 }
 
 const fmt = (n: number) => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(n)
@@ -472,6 +460,8 @@ function ProductForm({ token, product, onClose, onSaved }: { token: string | nul
 
   const handleSubmit = async () => {
     if (!form.name || !form.price || !form.categoryId) { setError('Name, price, and category are required'); return }
+    if (!form.description) { setError('Description is required'); return }
+    if (uploading) { setError('Please wait for image upload to complete'); return }
     setSaving(true); setError('')
     try {
       const body = {
