@@ -1134,7 +1134,7 @@ export function ProductDetail() {
           {/* Tags */}
           {product.tags.length > 0 && (
             <div className="flex flex-wrap gap-2">
-              {(Array.isArray(product.tags) ? product.tags : typeof product.tags === 'string' ? JSON.parse(product.tags) : []).map((tag) => (
+              {(Array.isArray(product.tags) ? product.tags : typeof product.tags === 'string' ? product.tags.split(',').map((t:string)=>t.trim()).filter(Boolean) : []).map((tag) => (
                 <Badge
                   key={tag}
                   variant="outline"
