@@ -52,15 +52,6 @@ function ensureArrayFields(products: any[]): any[] {
 }
 
 // Safety: ensure tags/occasions/relationships are always arrays
-function ensureArrayFields(products: any[]): any[] {
-  return products.map((p) => ({
-    ...p,
-    tags: Array.isArray(p.tags) ? p.tags : (typeof p.tags === 'string' && p.tags ? p.tags.split(',').map((t: string) => t.trim()).filter(Boolean) : []),
-    occasions: Array.isArray(p.occasions) ? p.occasions : [],
-    recipientTypes: Array.isArray(p.recipientTypes) ? p.recipientTypes : [],
-    relationships: Array.isArray(p.relationships) ? p.relationships : [],
-  }))
-}
 
 const PLATFORM_LOGO_MAP: Record<string, string> = {
   myntra: '/logos/myntra.png',
