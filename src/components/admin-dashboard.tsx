@@ -2652,7 +2652,7 @@ function ImportTab({ token, onMutate }: { token: string | null; onMutate: () => 
                 <p className="line-clamp-4 text-xs text-amber-200/50">{scrapedProduct.description}</p>
                 {scrapedProduct.tags?.length > 0 && (
                   <div className="flex flex-wrap gap-1">
-                    {scrapedProduct.tags.map((t: string, i: number) => (
+                    {(Array.isArray(scrapedProduct.tags) ? scrapedProduct.tags : []).map((t: string, i: number) => (
                       <Badge key={i} className="bg-amber-600/10 text-amber-400 border-amber-600/20 text-[10px]">{t}</Badge>
                     ))}
                   </div>
